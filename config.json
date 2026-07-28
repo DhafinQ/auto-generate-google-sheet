@@ -1,0 +1,140 @@
+{
+  "mode": "PRESET",
+  "active_preset_group": "laporan_harian_otomatis",
+  "preset_groups": {
+    "laporan_harian_otomatis": {
+      "combine_into_single_sheet": true,
+      "single_sheet_name_pattern": "Laporan_{date}",
+      "metadata": {
+        "company_logo_url": "https://ptrumahsabahindonesia.com/wp-content/uploads/2025/10/ABT_CIKONENG-removebg-preview.png",
+        "form_title": "FORM HARIAN PRODUKSI DAN DISTRIBUSI IPA CIKONENG",
+        "doc_info": {
+          "doc_number": "ABT/QASS/FM-018 Rev.00",
+          "effective_date": "04 Juli 2025",
+          "revision": "00",
+          "page": "1 dari 1"
+        },
+        "shifts": [
+          {
+            "shift_id": 1,
+            "label": "Shift 1",
+            "default_officer": "Bagoes / Hedi"
+          },
+          {
+            "shift_id": 2,
+            "label": "Shift 2",
+            "default_officer": "Bagoes / Tuhon"
+          },
+          {
+            "shift_id": 3,
+            "label": "Shift 3",
+            "default_officer": "-"
+          }
+        ],
+        "approvals": {
+          "checked_by": "Spw. Produksi",
+          "approved_by": "Manajer Operasional"
+        }
+      },
+      "reports": [
+        {
+          "report_id": "filter_tank_monitor",
+          "title": "LAPORAN KINERJA TANGKI FILTER (IPA 250)",
+          "sheet_name": "Filter_Tank_Monitor",
+          "tables": [
+            "250_ft1",
+            "250_ft2",
+            "250_ft3",
+            "250_ft4",
+            "250_ft5",
+            "250_ft6",
+            "250_ft7",
+            "250_ft8"
+          ],
+          "table_labels": {
+            "250_ft1": "Tangki Filter 1",
+            "250_ft2": "Tangki Filter 2",
+            "250_ft3": "Tangki Filter 3",
+            "250_ft4": "Tangki Filter 4",
+            "250_ft5": "Tangki Filter 5",
+            "250_ft6": "Tangki Filter 6",
+            "250_ft7": "Tangki Filter 7",
+            "250_ft8": "Tangki Filter 8"
+          },
+          "tag_filters": [
+            "Level Trx.",
+            "Pressure Trx",
+            "V_Inlet",
+            "Blower 1",
+            "BW Pump 1"
+          ],
+          "column_labels": {
+            "Level Trx.": "Level Air (m)",
+            "Pressure Trx": "Tekanan (Bar)",
+            "V_Inlet": "Status Inlet",
+            "Blower 1": "Speed Blower 1",
+            "BW Pump 1": "Pompa Backwash 1"
+          }
+        },
+        {
+          "report_id": "kualitas_air_clarifier",
+          "title": "LAPORAN PEMANTAUAN KUALITAS AIR & DOSING",
+          "sheet_name": "Kualitas_Air",
+          "tables": [
+            "250_ct"
+          ],
+          "table_labels": {
+            "250_ct": "Clarifier Tank"
+          },
+          "tag_filters": [
+            "pH",
+            "Turbidity",
+            "Chlorine",
+            "pH_Supernatan",
+            "Turb_Supernatan",
+            "Chlor_Supernatan"
+          ],
+          "column_labels": {
+            "pH": "pH Air Olahan",
+            "Turbidity": "Kekeruhan (NTU)",
+            "Chlorine": "Sisa Klor (mg/L)",
+            "pH_Supernatan": "pH Supernatan",
+            "Turb_Supernatan": "Kekeruhan Supernatan (NTU)",
+            "Chlor_Supernatan": "Sisa Klor Supernatan (mg/L)"
+          }
+        },
+        {
+          "report_id": "filter_running_hours",
+          "title": "LAPORAN JAM KERJA FILTER (RUNNING HOURS)",
+          "sheet_name": "Running_Hours",
+          "tables": [
+            "250_fthrs"
+          ],
+          "table_labels": {
+            "250_fthrs": "Jam Kerja Filter"
+          },
+          "tag_filters": [
+            "FT1",
+            "FT2",
+            "FT3",
+            "FT4",
+            "FT5",
+            "FT6",
+            "FT7",
+            "FT8"
+          ],
+          "column_labels": {
+            "FT1": "Jam Kerja FT1 (Jam)",
+            "FT2": "Jam Kerja FT2 (Jam)",
+            "FT3": "Jam Kerja FT3 (Jam)",
+            "FT4": "Jam Kerja FT4 (Jam)",
+            "FT5": "Jam Kerja FT5 (Jam)",
+            "FT6": "Jam Kerja FT6 (Jam)",
+            "FT7": "Jam Kerja FT7 (Jam)",
+            "FT8": "Jam Kerja FT8 (Jam)"
+          }
+        }
+      ]
+    }
+  }
+}
