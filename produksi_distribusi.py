@@ -21,6 +21,32 @@ CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 CONFIG_FILE = os.getenv("CONFIG_FILE", "config_produksi_distribusi.json")
 
+# Mapping Bahasa Indonesia untuk Hari & Bulan
+HARI_INDONESIA = {
+    "Monday": "Senin",
+    "Tuesday": "Selasa",
+    "Wednesday": "Rabu",
+    "Thursday": "Kamis",
+    "Friday": "Jumat",
+    "Saturday": "Sabtu",
+    "Sunday": "Minggu",
+}
+
+BULAN_INDONESIA = {
+    1: "Januari",
+    2: "Februari",
+    3: "Maret",
+    4: "April",
+    5: "Mei",
+    6: "Juni",
+    7: "Juli",
+    8: "Agustus",
+    9: "September",
+    10: "Oktober",
+    11: "November",
+    12: "Desember",
+}
+
 
 def get_db_connection():
   db_url = (
@@ -128,7 +154,7 @@ def process_fixed_snapshot_data(
           df_master[col_master_key] = processed_series.fillna("-")
 
     except Exception as e:
-      print(f" Error query tabel {matched_table}: {e}")
+      print(f"Error query tabel {matched_table}: {e}")
 
   expected_cols = [f"COL_{i}" for i in range(1, 15)]
   for col in expected_cols:
@@ -147,7 +173,7 @@ def main():
   # Validasi SPREADSHEET_ID
   if not SPREADSHEET_ID:
     print(
-        " Error: `SPREADSHEET_ID` tidak ditemukan di environment variable!"
+        "Error: `SPREADSHEET_ID` tidak ditemukan di environment variable!"
     )
     return
 
@@ -159,14 +185,17 @@ def main():
   today_str = today_date.strftime("%Y-%m-%d")
   yesterday_str = yesterday_date.strftime("%Y-%m-%d")
 
-  print(f"Periode Laporan: {yesterday_str} 07:00:00 s/d {today_str} 06:00:00 (24 Jam)")
+  print(
+      f"Periode Laporan: {yesterday_str} 07:00:00 s/d {today_str} 06:00:00"
+      " (24 Jam)"
+  )
   print(f"Config File    : {CONFIG_FILE}")
   print(f"Spreadsheet ID : {SPREADSHEET_ID}")
 
   TEMPLATE_SHEET_NAME = "template_produksi_distribusi"
 
   if not os.path.exists(CONFIG_FILE):
-    print(f" File config `{CONFIG_FILE}` tidak ditemukan!")
+    print(f"File config `{CONFIG_FILE}` tidak ditemukan!")
     return
 
   with open(CONFIG_FILE, "r") as file:
@@ -179,7 +208,7 @@ def main():
     gc = gspread.service_account(filename=CREDENTIALS_FILE)
     sh = gc.open_by_key(SPREADSHEET_ID)
   except Exception as e:
-    print(f" Gagal terhubung ke Google Sheets: {e}")
+    print(f"Gagal terhubung ke Google Sheets: {e}")
     return
 
   target_sheet_name = f"Laporan_{today_str}"
@@ -188,7 +217,7 @@ def main():
     template_worksheet = sh.worksheet(TEMPLATE_SHEET_NAME)
   except gspread.exceptions.WorksheetNotFound:
     print(
-        f" Sheet Template '{TEMPLATE_SHEET_NAME}' tidak ditemukan di Google"
+        f"Sheet Template '{TEMPLATE_SHEET_NAME}' tidak ditemukan di Google"
         " Sheets!"
     )
     return
@@ -197,23 +226,31 @@ def main():
   try:
     old_sheet = sh.worksheet(target_sheet_name)
     sh.del_worksheet(old_sheet)
-    print(f" Sheet harian lama '{target_sheet_name}' dihapus.")
+    print(f"Sheet harian lama '{target_sheet_name}' dihapus.")
   except gspread.exceptions.WorksheetNotFound:
     pass
 
   # Duplikasi Template
-  print(f" Menduplikasi '{TEMPLATE_SHEET_NAME}' -> '{target_sheet_name}'...")
+  print(f"Menduplikasi '{TEMPLATE_SHEET_NAME}' -> '{target_sheet_name}'...")
   new_worksheet = template_worksheet.duplicate(
       new_sheet_name=target_sheet_name
   )
 
-  # Update Tanggal di Kop
-  formatted_date_label = f"{today_date.strftime('%d-%m-%Y')}"
-  new_worksheet.update_cell(6, 3, f"Tanggal: {formatted_date_label}")
+  # -------------------------------------------------------------
+  # UPDATE TANGGAL DI KOP SURAT (Sel B6:C6 Merged)
+  # -------------------------------------------------------------
+  hari_nama = HARI_INDONESIA.get(yesterday_date.strftime("%A"), "")
+  bulan_nama = BULAN_INDONESIA.get(yesterday_date.month, "")
+  formatted_laporan_date = (
+      f"{hari_nama}, {yesterday_date.day} {bulan_nama} {yesterday_date.year}"
+  )
+
+  # Di-update ke sel B6 (Sel B6 & C6 yang sudah ter-merge di template)
+  new_worksheet.update_cell(6, 2, formatted_laporan_date)
 
   # Tarik Data Snapshot (24 Baris)
   engine = get_db_connection()
-  print("\n Memproses data snapshot dari MySQL...")
+  print("\nMemproses data snapshot dari MySQL...")
   df_data = process_fixed_snapshot_data(
       engine, column_mappings, yesterday_str, today_str
   )
@@ -226,14 +263,14 @@ def main():
   data_block2 = df_data[block2_cols].values.tolist()
 
   # Push ke Range Presisi B11:K34 dan O11:R34 (Tepat 24 Baris)
-  print(" Menulis Blok 1 (Kolom 1 - 10) ke range B11:K34...")
+  print("Menulis Blok 1 (Kolom 1 - 10) ke range B11:K34...")
   new_worksheet.update(values=data_block1, range_name="B11:K34")
 
-  print(" Menulis Blok 2 (Kolom 11 - 14) ke range O11:R34...")
+  print("Menulis Blok 2 (Kolom 11 - 14) ke range O11:R34...")
   new_worksheet.update(values=data_block2, range_name="O11:R34")
 
   print(
-      f"\n [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Selesai! Laporan"
+      f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Selesai! Laporan"
       f" berhasil digenerate di sheet: '{target_sheet_name}'"
   )
 
