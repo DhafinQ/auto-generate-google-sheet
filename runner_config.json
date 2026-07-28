@@ -1,0 +1,26 @@
+{
+  "cron_schedule": "03 07 * * *",
+  "reports_queue": [
+    {
+      "report_name": "Laporan Produksi & Distribusi IPA Cikoneng",
+      "enabled": true,
+      "script_path": "produksi_distribusi.py",
+      "config_file": "config_produksi_distribusi.json",
+      "spreadsheet_id": ""
+    },
+    {
+      "report_name": "Laporan Kinerja Tangki Filter (Unified Master)",
+      "enabled": false,
+      "script_path": "auto_preset.py",
+      "config_file": "config_filter_tank.json",
+      "spreadsheet_id": ""
+    },
+    {
+      "report_name": "Laporan Kualitas Air & Chemical Dosing",
+      "enabled": false,
+      "script_path": "auto_kualitas_air.py",
+      "config_file": "config_kualitas_air.json",
+      "spreadsheet_id": ""
+    }
+  ]
+}

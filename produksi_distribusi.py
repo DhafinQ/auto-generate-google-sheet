@@ -7,15 +7,19 @@ import numpy as np
 import pandas as pd
 from sqlalchemy import create_engine, inspect
 
-# 1. Load Environment Variables
+# 1. Load Environment Variables (.env)
 load_dotenv()
+
 DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_USER = os.getenv("DB_USER", "root")
 DB_PASS = os.getenv("DB_PASS", "")
 DB_NAME = os.getenv("DB_NAME", "db_sensor")
 DB_PORT = os.getenv("DB_PORT", 3306)
-SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
+
+# 2. Variable Dinamis dari Orchestrator (run_all_reports.py)
+SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
+CONFIG_FILE = os.getenv("CONFIG_FILE", "config_produksi_distribusi.json")
 
 
 def get_db_connection():
@@ -30,14 +34,14 @@ def process_fixed_snapshot_data(
 ):
   """Menarik data snapshot dari KEMARIN jam 07:00 s.d. HARI INI jam 06:00 (Pas 24 Baris)."""
   start_cutoff = f"{yesterday_str} 06:50:00"
-  end_cutoff = f"{today_str} 07:00:00"  # Tetap 07:00 agar lookup jam 06:00 presisi
+  end_cutoff = f"{today_str} 07:00:00"
 
   inspector = inspect(engine)
 
-  # PERBAIKAN: Target jam laporan hanya 24 baris (07:00 kemarin s.d. 06:00 hari ini)
+  # Target jam laporan: 07:00 kemarin s.d. 06:00 hari ini (24 Baris)
   target_dt = pd.date_range(
       start=f"{yesterday_str} 07:00:00",
-      end=f"{today_str} 06:00:00",  # <--- Diubah ke 06:00 (24 jam operasional)
+      end=f"{today_str} 06:00:00",
       freq="1h",
   )
   df_targets = pd.DataFrame({"TargetTime": target_dt})
@@ -124,7 +128,7 @@ def process_fixed_snapshot_data(
           df_master[col_master_key] = processed_series.fillna("-")
 
     except Exception as e:
-      print(f"❌ Error query tabel {matched_table}: {e}")
+      print(f" Error query tabel {matched_table}: {e}")
 
   expected_cols = [f"COL_{i}" for i in range(1, 15)]
   for col in expected_cols:
@@ -140,6 +144,13 @@ def main():
       " Report Generator..."
   )
 
+  # Validasi SPREADSHEET_ID
+  if not SPREADSHEET_ID:
+    print(
+        " Error: `SPREADSHEET_ID` tidak ditemukan di environment variable!"
+    )
+    return
+
   # Tanggal Dinamis
   now = datetime.now()
   today_date = now.date()
@@ -148,16 +159,14 @@ def main():
   today_str = today_date.strftime("%Y-%m-%d")
   yesterday_str = yesterday_date.strftime("%Y-%m-%d")
 
-  print(
-      f"📅 Periode Laporan: {yesterday_str} 07:00:00 s/d {today_str} 06:00:00"
-      " (24 Jam)"
-  )
+  print(f"Periode Laporan: {yesterday_str} 07:00:00 s/d {today_str} 06:00:00 (24 Jam)")
+  print(f"Config File    : {CONFIG_FILE}")
+  print(f"Spreadsheet ID : {SPREADSHEET_ID}")
 
-  CONFIG_FILE = "config_produksi_distribusi.json"
   TEMPLATE_SHEET_NAME = "template_produksi_distribusi"
 
   if not os.path.exists(CONFIG_FILE):
-    print(f"❌ File `{CONFIG_FILE}` tidak ditemukan!")
+    print(f" File config `{CONFIG_FILE}` tidak ditemukan!")
     return
 
   with open(CONFIG_FILE, "r") as file:
@@ -165,11 +174,12 @@ def main():
 
   column_mappings = config.get("fixed_column_mapping", [])
 
+  # Koneksi Google Sheets
   try:
     gc = gspread.service_account(filename=CREDENTIALS_FILE)
     sh = gc.open_by_key(SPREADSHEET_ID)
   except Exception as e:
-    print(f"❌ Gagal terhubung ke Google Sheets: {e}")
+    print(f" Gagal terhubung ke Google Sheets: {e}")
     return
 
   target_sheet_name = f"Laporan_{today_str}"
@@ -178,7 +188,7 @@ def main():
     template_worksheet = sh.worksheet(TEMPLATE_SHEET_NAME)
   except gspread.exceptions.WorksheetNotFound:
     print(
-        f"❌ Sheet Template '{TEMPLATE_SHEET_NAME}' tidak ditemukan di Google"
+        f" Sheet Template '{TEMPLATE_SHEET_NAME}' tidak ditemukan di Google"
         " Sheets!"
     )
     return
@@ -187,12 +197,12 @@ def main():
   try:
     old_sheet = sh.worksheet(target_sheet_name)
     sh.del_worksheet(old_sheet)
-    print(f"🗑️ Sheet harian lama '{target_sheet_name}' dihapus.")
+    print(f" Sheet harian lama '{target_sheet_name}' dihapus.")
   except gspread.exceptions.WorksheetNotFound:
     pass
 
   # Duplikasi Template
-  print(f"📋 Menduplikasi '{TEMPLATE_SHEET_NAME}' -> '{target_sheet_name}'...")
+  print(f" Menduplikasi '{TEMPLATE_SHEET_NAME}' -> '{target_sheet_name}'...")
   new_worksheet = template_worksheet.duplicate(
       new_sheet_name=target_sheet_name
   )
@@ -203,7 +213,7 @@ def main():
 
   # Tarik Data Snapshot (24 Baris)
   engine = get_db_connection()
-  print("\n🔄 Memproses data snapshot dari MySQL...")
+  print("\n Memproses data snapshot dari MySQL...")
   df_data = process_fixed_snapshot_data(
       engine, column_mappings, yesterday_str, today_str
   )
@@ -216,14 +226,14 @@ def main():
   data_block2 = df_data[block2_cols].values.tolist()
 
   # Push ke Range Presisi B11:K34 dan O11:R34 (Tepat 24 Baris)
-  print("🚀 Menulis Blok 1 (Kolom 1 - 10) ke range B11:K34...")
+  print(" Menulis Blok 1 (Kolom 1 - 10) ke range B11:K34...")
   new_worksheet.update(values=data_block1, range_name="B11:K34")
 
-  print("🚀 Menulis Blok 2 (Kolom 11 - 14) ke range O11:R34...")
+  print(" Menulis Blok 2 (Kolom 11 - 14) ke range O11:R34...")
   new_worksheet.update(values=data_block2, range_name="O11:R34")
 
   print(
-      f"\n🎉 [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Selesai! Laporan"
+      f"\n [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Selesai! Laporan"
       f" berhasil digenerate di sheet: '{target_sheet_name}'"
   )
 
