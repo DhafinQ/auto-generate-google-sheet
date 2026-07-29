@@ -175,7 +175,7 @@ def main():
     return
 
   now = datetime.now()
-  today_date = now.date() - timedelta(days=1)
+  today_date = now.date()
   yesterday_date = today_date - timedelta(days=1)
 
   today_str = today_date.strftime("%Y-%m-%d")
