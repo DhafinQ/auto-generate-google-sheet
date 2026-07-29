@@ -9,10 +9,10 @@
       "spreadsheet_id": ""
     },
     {
-      "report_name": "Laporan Kinerja Tangki Filter (Unified Master)",
-      "enabled": false,
-      "script_path": "auto_preset.py",
-      "config_file": "config_filter_tank.json",
+      "report_name": "Laporan Pengaturan Stroke Pompa Dosing Bahan Kimia",
+      "enabled": true,
+      "script_path": "pengaturan_stroke_dosing_kimia.py",
+      "config_file": "config_pengaturan_dosing_kimia.json",
       "spreadsheet_id": ""
     },
     {

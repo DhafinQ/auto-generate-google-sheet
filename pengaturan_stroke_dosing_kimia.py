@@ -17,9 +17,9 @@ DB_NAME = os.getenv("DB_NAME", "db_sensor")
 DB_PORT = os.getenv("DB_PORT", 3306)
 CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
 
-# 2. Variable Dinamis dari Orchestrator (run_all_reports.py)
+# Variable Dinamis dari Orchestrator (run_all_reports.py)
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
-CONFIG_FILE = os.getenv("CONFIG_FILE", "config_produksi_distribusi.json")
+CONFIG_FILE = os.getenv("CONFIG_FILE", "config_dosing_chlorine.json")
 
 # Mapping Bahasa Indonesia untuk Hari & Bulan
 HARI_INDONESIA = {
@@ -64,12 +64,13 @@ def process_fixed_snapshot_data(
 
   inspector = inspect(engine)
 
-  # Target jam laporan: 07:00 kemarin s.d. 07:00 hari ini (25 Baris)
+  # Target jam laporan: 07:00 kemarin s.d. 07:00 hari ini (25 Baris: Row 10 - Row 34)
   target_dt = pd.date_range(
       start=f"{yesterday_str} 07:00:00",
       end=f"{today_str} 07:00:00",
       freq="1h",
   )
+
   df_targets = pd.DataFrame({"TargetTime": target_dt})
   df_targets["Jam"] = df_targets["TargetTime"].dt.strftime("%H:00")
 
@@ -81,11 +82,12 @@ def process_fixed_snapshot_data(
     tbl = item["table"]
     col = item["column"]
     idx = item["target_column_index"]
-    decimals = item.get("decimals", 4)
+    letter = item["target_col_letter"]
+    decimals = item.get("decimals", 0)
 
     if tbl not in tables_group:
       tables_group[tbl] = []
-    tables_group[tbl].append((col, idx, decimals))
+    tables_group[tbl].append((col, idx, letter, decimals))
 
   all_db_tables = inspector.get_table_names()
 
@@ -94,6 +96,7 @@ def process_fixed_snapshot_data(
         (t for t in all_db_tables if t.lower() == table_name.lower()), None
     )
     if not matched_table:
+      print(f" Warning: Tabel `{table_name}` tidak ditemukan di database!")
       continue
 
     existing_cols_map = {
@@ -102,10 +105,10 @@ def process_fixed_snapshot_data(
     }
 
     valid_mappings = []
-    for target_col_name, idx, decimals in mappings:
+    for target_col_name, idx, letter, decimals in mappings:
       real_db_col = existing_cols_map.get(target_col_name.lower())
       if real_db_col:
-        valid_mappings.append((real_db_col, idx, decimals))
+        valid_mappings.append((real_db_col, idx, letter, decimals))
 
     if not valid_mappings:
       continue
@@ -135,8 +138,8 @@ def process_fixed_snapshot_data(
           direction="backward",
       )
 
-      # Pembulatan Ceil Dinamis
-      for real_db_col, col_index, decimals in valid_mappings:
+      # Pembulatan & Formatting Dinamis (Nilai 0 Tetap Ditulis Angka 0)
+      for real_db_col, col_index, letter, decimals in valid_mappings:
         col_master_key = f"COL_{col_index}"
         series_numeric = pd.to_numeric(
             df_snapshot[real_db_col], errors="coerce"
@@ -154,28 +157,23 @@ def process_fixed_snapshot_data(
           df_master[col_master_key] = processed_series.fillna("-")
 
     except Exception as e:
-      print(f"Error query tabel {matched_table}: {e}")
+      print(f" Error query tabel {matched_table}: {e}")
 
-  expected_cols = [f"COL_{i}" for i in range(1, 15)]
-  for col in expected_cols:
-    if col not in df_master.columns:
-      df_master[col] = "-"
-
-  return df_master[expected_cols].fillna("-")
+  return df_master
 
 
 def main():
   print(
-      f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Memulai Automatic Daily"
-      " Report Generator..."
+      f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Memulai Report Dosing &"
+      " Chlorine Generator..."
   )
 
-  # Validasi SPREADSHEET_ID
   if not SPREADSHEET_ID:
-    print("Error: `SPREADSHEET_ID` tidak ditemukan di environment variable!")
+    print(
+        " Error: `SPREADSHEET_ID` tidak ditemukan di environment variable!"
+    )
     return
 
-  # Tanggal Dinamis
   now = datetime.now()
   today_date = now.date() - timedelta(days=1)
   yesterday_date = today_date - timedelta(days=1)
@@ -184,92 +182,96 @@ def main():
   yesterday_str = yesterday_date.strftime("%Y-%m-%d")
 
   print(
-      f"Periode Laporan: {yesterday_str} 07:00:00 s/d {today_str} 07:00:00"
+      f" Periode Laporan: {yesterday_str} 07:00:00 s/d {today_str} 07:00:00"
       " (25 Jam)"
   )
-  print(f"Config File    : {CONFIG_FILE}")
-  print(f"Spreadsheet ID : {SPREADSHEET_ID}")
-
-  TEMPLATE_SHEET_NAME = "template_produksi_distribusi"
+  print(f" Config File    : {CONFIG_FILE}")
+  print(f" Spreadsheet ID : {SPREADSHEET_ID}")
 
   if not os.path.exists(CONFIG_FILE):
-    print(f"File config `{CONFIG_FILE}` tidak ditemukan!")
+    print(f" File config `{CONFIG_FILE}` tidak ditemukan!")
     return
 
   with open(CONFIG_FILE, "r") as file:
     config = json.load(file)
 
   column_mappings = config.get("fixed_column_mapping", [])
+  TEMPLATE_SHEET_NAME = config.get(
+      "template_sheet_name", "template_pengaturan_stroke_pompa_bahan_kimia"
+  )
 
   # Koneksi Google Sheets
   try:
     gc = gspread.service_account(filename=CREDENTIALS_FILE)
     sh = gc.open_by_key(SPREADSHEET_ID)
   except Exception as e:
-    print(f"Gagal terhubung ke Google Sheets: {e}")
+    print(f" Gagal terhubung ke Google Sheets: {e}")
     return
 
-  target_sheet_name = f"Laporan_{today_str}"
+  target_sheet_name = f"Laporan_Dosing_{yesterday_str}"
 
   try:
     template_worksheet = sh.worksheet(TEMPLATE_SHEET_NAME)
   except gspread.exceptions.WorksheetNotFound:
     print(
-        f"Sheet Template '{TEMPLATE_SHEET_NAME}' tidak ditemukan di Google"
+        f" Sheet Template '{TEMPLATE_SHEET_NAME}' tidak ditemukan di Google"
         " Sheets!"
     )
     return
 
-  # Hapus sheet lama jika sudah ada
+  # Hapus sheet harian lama jika ada
   try:
     old_sheet = sh.worksheet(target_sheet_name)
     sh.del_worksheet(old_sheet)
-    print(f"Sheet harian lama '{target_sheet_name}' dihapus.")
+    print(f" Sheet harian lama '{target_sheet_name}' dihapus.")
   except gspread.exceptions.WorksheetNotFound:
     pass
 
   # Duplikasi Template
-  print(f"Menduplikasi '{TEMPLATE_SHEET_NAME}' -> '{target_sheet_name}'...")
+  print(f" Menduplikasi '{TEMPLATE_SHEET_NAME}' -> '{target_sheet_name}'...")
   new_worksheet = template_worksheet.duplicate(
       new_sheet_name=target_sheet_name
   )
 
-  # -------------------------------------------------------------
-  # UPDATE TANGGAL DI KOP SURAT (Sel B6:C6 Merged)
-  # -------------------------------------------------------------
+  # Update Tanggal di Kop Surat (Sel B6:C6 Merged) -> "Senin, 27 Juli 2026"
   hari_nama = HARI_INDONESIA.get(yesterday_date.strftime("%A"), "")
   bulan_nama = BULAN_INDONESIA.get(yesterday_date.month, "")
   formatted_laporan_date = (
       f"{hari_nama}, {yesterday_date.day} {bulan_nama} {yesterday_date.year}"
   )
 
-  # Update ke sel B6
   new_worksheet.update_cell(5, 3, formatted_laporan_date)
 
-  # Tarik Data Snapshot (25 Baris)
+  # Tarik Data Snapshot dari MySQL
   engine = get_db_connection()
-  print("\nMemproses data snapshot dari MySQL...")
-  df_data = process_fixed_snapshot_data(
+  print("\n Memproses data snapshot dari MySQL...")
+  df_master = process_fixed_snapshot_data(
       engine, column_mappings, yesterday_str, today_str
   )
 
-  # Pisahkan 2 Blok
-  block1_cols = [f"COL_{i}" for i in range(1, 11)]
-  data_block1 = df_data[block1_cols].values.tolist()
+  # PUSH DATA PER KOLOM (Sesuai Row 10 s.d 34 -> Pas 25 Baris)
+  print(" Menulis data ke kolom target di Google Sheets...")
+  batch_updates = []
 
-  block2_cols = [f"COL_{i}" for i in range(11, 15)]
-  data_block2 = df_data[block2_cols].values.tolist()
+  for item in column_mappings:
+    idx = item["target_column_index"]
+    col_letter = item["target_col_letter"]
+    col_key = f"COL_{idx}"
 
-  # PERBAIKAN RANGE: Naik ke Row 10 (Row 10 s.d Row 34 = Tepat 25 Baris)
-  print("Menulis Blok 1 (Kolom 1 - 10) ke range B10:K34...")
-  new_worksheet.update(values=data_block1, range_name="B10:K34")
+    if col_key in df_master.columns:
+      # Ambil 25 baris data untuk kolom ini
+      values_list = [[v] for v in df_master[col_key].tolist()]
+      range_str = f"{col_letter}10:{col_letter}34"
 
-  print("Menulis Blok 2 (Kolom 11 - 14) ke range O10:R34...")
-  new_worksheet.update(values=data_block2, range_name="O10:R34")
+      batch_updates.append({"range": range_str, "values": values_list})
+
+  if batch_updates:
+    new_worksheet.batch_update(batch_updates)
+    print(f" Berhasil mengupdate {len(batch_updates)} kolom target!")
 
   print(
-      f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Selesai! Laporan"
-      f" berhasil digenerate di sheet: '{target_sheet_name}'"
+      f"\n [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Selesai! Laporan"
+      f" Dosing berhasil digenerate di sheet: '{target_sheet_name}'"
   )
 
 

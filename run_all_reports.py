@@ -56,7 +56,6 @@ def run_orchestrator():
       result = subprocess.run(
           [sys.executable, script],
           env=env_vars,
-          capture_output=True,
           text=True,
           check=True,
       )
