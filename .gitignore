@@ -1,2 +1,4 @@
 credentials.json
 .env
+configs/*
+!configs/example.json

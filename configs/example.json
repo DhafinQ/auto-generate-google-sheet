@@ -1,0 +1,32 @@
+{
+  "single_sheet_name_pattern": "Laporan_Harian_Produksi_Distribusi_{date}",
+  "enabled": true,
+  "spreadsheet_id": "",
+  "metadata": {
+    "template_sheet_name": "template_produksi_distribusi",
+    "date_cell": { "row": 5, "col": 3 },
+    "zero_as_off": false,
+    "intervals": {
+      "start_time": "07:00",
+      "end_time": "07:00",
+      "interval_step_hours": 1,
+      "buffer_minutes": 60
+    }
+  },
+  "fixed_column_mapping": [
+    { "target_column_index": 1, "target_col_letter": "B", "target_row": 10, "table": "Flow", "column": "Tot_In_WTP50LPS", "decimals": 0 },
+    { "target_column_index": 2, "target_col_letter": "C", "target_row": 10, "table": "Flow", "column": "In_WTP50LPS", "decimals": 0 },
+    { "target_column_index": 3, "target_col_letter": "D", "target_row": 10, "table": "Flow", "column": "Tot_In_WTP250LPS", "decimals": 0 },
+    { "target_column_index": 4, "target_col_letter": "E", "target_row": 10, "table": "Flow", "column": "In_WTP250LPS", "decimals": 0 },
+    { "target_column_index": 5, "target_col_letter": "F", "target_row": 10, "table": "Flow", "column": "Tot_In_WTP300LPS", "decimals": 0 },
+    { "target_column_index": 6, "target_col_letter": "G", "target_row": 10, "table": "Flow", "column": "In_WTP300LPS", "decimals": 0 },
+    { "target_column_index": 7, "target_col_letter": "H", "target_row": 10, "table": "Flow", "column": "Tot_BWRT", "decimals": 0 },
+    { "target_column_index": 8, "target_col_letter": "I", "target_row": 10, "table": "Flow", "column": "BWRT", "decimals": 0 },
+    { "target_column_index": 9, "target_col_letter": "J", "target_row": 10, "table": "Flow", "column": "Tot_Dist_Main", "decimals": 0 },
+    { "target_column_index": 10, "target_col_letter": "K", "target_row": 10, "table": "Flow", "column": "Dist_Main", "decimals": 0 },
+    { "target_column_index": 11, "target_col_letter": "O", "target_row": 10, "table": "Level", "column": "2000m3_LIT_BAR", "decimals": 2 },
+    { "target_column_index": 12, "target_col_letter": "P", "target_row": 10, "table": "Level", "column": "2000m3_LIT_TIM", "decimals": 2 },
+    { "target_column_index": 13, "target_col_letter": "Q", "target_row": 10, "table": "Level", "column": "3000m3_LIT_UT", "decimals": 2 },
+    { "target_column_index": 14, "target_col_letter": "R", "target_row": 10, "table": "Level", "column": "3000m3_LIT_SEL", "decimals": 2 }
+  ]
+}

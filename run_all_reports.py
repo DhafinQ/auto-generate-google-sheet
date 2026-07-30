@@ -1,82 +1,333 @@
-from datetime import datetime
+from datetime import datetime, timedelta
+import glob
 import json
 import os
-import subprocess
-import sys
+from dotenv import load_dotenv
+import gspread
+import numpy as np
+import pandas as pd
+from sqlalchemy import create_engine, inspect
+
+# 1. Load Environment Variables Global (.env)
+load_dotenv()
+DB_HOST = os.getenv("DB_HOST", "localhost")
+DB_USER = os.getenv("DB_USER", "root")
+DB_PASS = os.getenv("DB_PASS", "")
+DB_NAME = os.getenv("DB_NAME", "db_sensor")
+DB_PORT = os.getenv("DB_PORT", 3306)
+CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
+
+# Mapping Bahasa Indonesia untuk Hari & Bulan
+HARI_INDONESIA = {
+    "Monday": "Senin",
+    "Tuesday": "Selasa",
+    "Wednesday": "Rabu",
+    "Thursday": "Kamis",
+    "Friday": "Jumat",
+    "Saturday": "Sabtu",
+    "Sunday": "Minggu",
+}
+BULAN_INDONESIA = {
+    1: "Januari",
+    2: "Februari",
+    3: "Maret",
+    4: "April",
+    5: "Mei",
+    6: "Juni",
+    7: "Juli",
+    8: "Agustus",
+    9: "September",
+    10: "Oktober",
+    11: "November",
+    12: "Desember",
+}
 
 
-def run_orchestrator():
+def get_db_connection():
+  db_url = (
+      f"mysql+mysqlconnector://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+  )
+  return create_engine(db_url)
+
+
+def col_letter_to_index(col_letter):
+  num = 0
+  for c in col_letter.upper():
+    num = num * 26 + (ord(c) - ord("A") + 1)
+  return num
+
+
+def group_contiguous_columns(column_mappings):
+  if not column_mappings:
+    return []
+
+  sorted_mappings = sorted(
+      column_mappings, key=lambda x: col_letter_to_index(x["target_col_letter"])
+  )
+  groups = []
+  current_group = [sorted_mappings[0]]
+
+  for prev, curr in zip(sorted_mappings[:-1], sorted_mappings[1:]):
+    prev_idx = col_letter_to_index(prev["target_col_letter"])
+    curr_idx = col_letter_to_index(curr["target_col_letter"])
+
+    if (
+        curr_idx == prev_idx + 1
+        and int(curr["target_row"]) == int(prev["target_row"])
+    ):
+      current_group.append(curr)
+    else:
+      groups.append(current_group)
+      current_group = [curr]
+
+  if current_group:
+    groups.append(current_group)
+  return groups
+
+
+def process_fixed_snapshot_data(
+    engine, column_mappings, metadata, yesterday_str, today_str
+):
+  intervals = metadata.get(
+      "intervals",
+      {
+          "start_time": "07:00",
+          "end_time": "07:00",
+          "interval_step_hours": 1,
+          "buffer_minutes": 20,
+      }
+  )
+  zero_as_off = metadata.get("zero_as_off", False)
+
+  start_time = intervals.get("start_time", "07:00")
+  end_time = intervals.get("end_time", "07:00")
+  step_hours = intervals.get("interval_step_hours", 1)
+  buffer_minutes = intervals.get("buffer_minutes", 10)
+
+  start_dt_str = f"{yesterday_str} {start_time}:00"
+  end_dt_str = f"{today_str} {end_time}:00"
+
+  start_cutoff = (
+      pd.to_datetime(start_dt_str) - timedelta(minutes=buffer_minutes)
+  ).strftime("%Y-%m-%d %H:%M:%S")
+  end_cutoff = (pd.to_datetime(end_dt_str) + timedelta(minutes=buffer_minutes)).strftime(
+      "%Y-%m-%d %H:%M:%S"
+  )
+
+  target_dt = pd.date_range(
+      start=start_dt_str, end=end_dt_str, freq=f"{step_hours}h"
+  )
+  df_targets = pd.DataFrame({"TargetTime": target_dt})
+  df_master = pd.DataFrame(
+      {"Jam": df_targets["TargetTime"].dt.strftime("%H:%M")}
+  )
+
+  tables_group = {}
+  for item in column_mappings:
+    tbl = item["table"]
+    if tbl not in tables_group:
+      tables_group[tbl] = []
+    tables_group[tbl].append((
+        item["column"],
+        item["target_column_index"],
+        item.get("decimals", 0),
+    ))
+
+  inspector = inspect(engine)
+  all_db_tables = inspector.get_table_names()
+
+  for table_name, mappings in tables_group.items():
+    matched_table = next(
+        (t for t in all_db_tables if t.lower() == table_name.lower()), None
+    )
+    if not matched_table:
+      continue
+
+    existing_cols = {
+        c["name"].lower(): c["name"]
+        for c in inspector.get_columns(matched_table)
+    }
+    valid_mappings = [
+        (existing_cols[c.lower()], idx, dec)
+        for c, idx, dec in mappings
+        if c.lower() in existing_cols
+    ]
+
+    if not valid_mappings:
+      continue
+
+    select_cols = ", ".join([f"`{m[0]}`" for m in valid_mappings])
+    query = f"SELECT `LocalTimestamp`, {select_cols} FROM `{matched_table}` WHERE `LocalTimestamp` >= '{start_cutoff}' AND `LocalTimestamp` <= '{end_cutoff}' ORDER BY `LocalTimestamp` ASC"
+
+    try:
+      df_db = pd.read_sql(query, engine)
+      if df_db.empty:
+        continue
+      df_db["LocalTimestamp"] = pd.to_datetime(df_db["LocalTimestamp"])
+
+      df_snapshot = pd.merge_asof(
+          df_targets,
+          df_db,
+          left_on="TargetTime",
+          right_on="LocalTimestamp",
+          direction="backward",
+      )
+
+      for real_col, idx, decimals in valid_mappings:
+        col_key = f"COL_{idx}"
+        series = pd.to_numeric(df_snapshot[real_col], errors="coerce")
+
+        if decimals == 0:
+          proc = np.ceil(series).fillna("-")
+          proc = proc.apply(
+              lambda x: int(x) if isinstance(x, (int, float)) else x
+          )
+        else:
+          factor = 10**decimals
+          proc = (np.ceil(series * factor) / factor).fillna("-")
+
+        if zero_as_off:
+          proc = proc.apply(
+              lambda x: "Off" if x in [0, "0", 0.0, "0.0"] else x
+          )
+
+        df_master[col_key] = proc
+
+    except Exception as e:
+      print(f"❌ Error query {matched_table}: {e}")
+
+  for item in column_mappings:
+    col_key = f"COL_{item['target_column_index']}"
+    if col_key not in df_master.columns:
+      df_master[col_key] = "-"
+
+  return df_master
+
+
+def process_report_config(config_file_path, engine, gc):
+  """Memproses 1 file konfigurasi JSON."""
+  with open(config_file_path, "r") as f:
+    config = json.load(f)
+
+  spreadsheet_id = config.get("spreadsheet_id")
+  if not spreadsheet_id:
+    raise ValueError("`spreadsheet_id` tidak ditemukan atau kosong di JSON!")
+
+  column_mappings = config.get("fixed_column_mapping", [])
+  metadata = config.get("metadata", {})
+  sheet_pattern = config.get("single_sheet_name_pattern", "Laporan_{date}")
+  template_name = metadata.get("template_sheet_name", "template_sheet")
+  date_cell = metadata.get("date_cell", {"row": 5, "col": 3})
+
+  now = datetime.now()
+  today_date = now.date()
+  yesterday_date = today_date - timedelta(days=1)
+  today_str = today_date.strftime("%Y-%m-%d")
+  yesterday_str = yesterday_date.strftime("%Y-%m-%d")
+
+  target_sheet_name = sheet_pattern.replace("{date}", yesterday_str)
+
+  sh = gc.open_by_key(spreadsheet_id)
+
+  try:
+    template_ws = sh.worksheet(template_name)
+  except gspread.exceptions.WorksheetNotFound:
+    raise ValueError(
+        f"Template '{template_name}' tidak ditemukan di Google Sheets!"
+    )
+
+  # Hapus sheet lama jika sudah ada
+  try:
+    sh.del_worksheet(sh.worksheet(target_sheet_name))
+  except gspread.exceptions.WorksheetNotFound:
+    pass
+
+  # Duplikasi Template
+  new_ws = template_ws.duplicate(new_sheet_name=target_sheet_name)
+
+  # Update Tanggal di Kop
+  hari = HARI_INDONESIA.get(yesterday_date.strftime("%A"), "")
+  bulan = BULAN_INDONESIA.get(yesterday_date.month, "")
+  formatted_date = f"{hari}, {yesterday_date.day} {bulan} {yesterday_date.year}"
+  new_ws.update_cell(
+      date_cell.get("row", 5), date_cell.get("col", 3), formatted_date
+  )
+
+  # Query & Process Data MySQL
+  df_data = process_fixed_snapshot_data(
+      engine, column_mappings, metadata, yesterday_str, today_str
+  )
+
+  # Batch Update per Grup Kolom
+  groups = group_contiguous_columns(column_mappings)
+  for g in groups:
+    start_c, end_c = g[0]["target_col_letter"], g[-1]["target_col_letter"]
+    start_r = int(g[0]["target_row"])
+    end_r = start_r + len(df_data) - 1
+    range_str = f"{start_c}{start_r}:{end_c}{end_r}"
+
+    keys = [f"COL_{item['target_column_index']}" for item in g]
+    new_ws.update(values=df_data[keys].values.tolist(), range_name=range_str)
+
+
+def main():
   print("=" * 70)
   print(
-      f" [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] MEMULAI OTOMATISASI"
+      f"🚀 [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] MEMULAI OTOMATISASI"
       " GENERATOR LAPORAN HARIAN"
   )
   print("=" * 70)
 
-  runner_config_file = "runner_config.json"
-  if not os.path.exists(runner_config_file):
-    print(f" Error: File `{runner_config_file}` tidak ditemukan!")
-    return
+  engine = get_db_connection()
+  gc = gspread.service_account(filename=CREDENTIALS_FILE)
 
-  with open(runner_config_file, "r") as f:
-    runner_config = json.load(f)
+  config_folder = "configs"
+  json_files = glob.glob(os.path.join(config_folder, "*.json"))
 
-  reports_queue = runner_config.get("reports_queue", [])
-  active_reports = [r for r in reports_queue if r.get("enabled", False)]
+  # Filter file yang bukan example
+  valid_files = [
+      f for f in json_files if not os.path.basename(f).startswith("example")
+  ]
+
+  active_reports = []
+  for filepath in valid_files:
+    try:
+      with open(filepath, "r") as f:
+        cfg = json.load(f)
+        if cfg.get("enabled", False):
+          active_reports.append((filepath, cfg))
+    except Exception as e:
+      print(f"⚠️ Warning: Gagal membaca file {filepath}: {e}")
 
   print(
-      f" Ditemukan {len(active_reports)} laporan aktif yang akan diproses.\n"
+      f"📋 Ditemukan {len(active_reports)} laporan aktif yang akan diproses.\n"
   )
 
   summary = []
 
-  for idx, report in enumerate(active_reports, start=1):
-    name = report.get("report_name")
-    script = report.get("script_path")
-    config = report.get("config_file")
-    spreadsheet_id = report.get("spreadsheet_id")
-
-    print(f"[{idx}/{len(active_reports)}] Memproses: '{name}'...")
-    print(f"     Script: {script} | Config: {config}")
-
-    if not os.path.exists(script):
-      print(f"     Error: File script `{script}` tidak ditemukan!\n")
-      summary.append((name, "FAILED (Script Missing)"))
-      continue
-
-    # Jalankan script sub-proses dengan mengirimkan argumen/env khusus
-    env_vars = os.environ.copy()
-    if config:
-      env_vars["CONFIG_FILE"] = config
-    if spreadsheet_id:
-      env_vars["SPREADSHEET_ID"] = spreadsheet_id
+  for idx, (filepath, cfg) in enumerate(active_reports, start=1):
+    report_name = cfg.get("report_name", os.path.basename(filepath))
+    print(f"[{idx}/{len(active_reports)}] Memproses: '{report_name}'...")
+    print(f"    📄 Config: {filepath}")
 
     try:
-      # Eksekusi script secara isolasi
-      result = subprocess.run(
-          [sys.executable, script],
-          env=env_vars,
-          text=True,
-          check=True,
-      )
-      print(f"     Berhasil!")
-      summary.append((name, "SUCCESS"))
-    except subprocess.CalledProcessError as e:
-      print(f"    Gagal mengeksekusi script `{script}`!")
-      print(f"    Detail Error:\n{e.stderr[:300]}...")
-      summary.append((name, "FAILED"))
+      process_report_config(filepath, engine, gc)
+      print("    ✅ Berhasil!\n")
+      summary.append((report_name, "SUCCESS"))
+    except Exception as e:
+      print(f"    ❌ Gagal memproses laporan!")
+      print(f"    ⚠️ Detail Error: {e}\n")
+      summary.append((report_name, "FAILED"))
 
-    print("-" * 50)
-
-  # Ringkasan Akhir Eksekusi
-  print("\n" + "=" * 70)
-  print("RINGKASAN EKSEKUSI LAPORAN HARIAN")
+  # Summary akhir
+  print("=" * 70)
+  print("📊 RINGKASAN EKSEKUSI LAPORAN HARIAN")
   print("=" * 70)
   for name, status in summary:
-    status_icon = "🟢" if "SUCCESS" in status else "🔴"
-    print(f"{status_icon} {name:<45} : {status}")
+    status_icon = "🟢" if status == "SUCCESS" else "🔴"
+    print(f"{status_icon} {name:<50} : {status}")
   print("=" * 70 + "\n")
 
 
 if __name__ == "__main__":
-  run_orchestrator()
+  main()
