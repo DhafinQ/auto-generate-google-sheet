@@ -209,7 +209,7 @@ def main():
     print(f"Gagal terhubung ke Google Sheets: {e}")
     return
 
-  target_sheet_name = f"Laporan_{today_str}"
+  target_sheet_name = f"Laporan_{yesterday_str}"
 
   try:
     template_worksheet = sh.worksheet(TEMPLATE_SHEET_NAME)
