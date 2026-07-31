@@ -1,4 +1,7 @@
 credentials.json
 .env
+.venv
+venv
+__pycache__
 configs/*
 !configs/example.json
