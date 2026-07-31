@@ -1,8 +1,11 @@
 {
+  "report_name": "Laporan Kualitas Proses Produksi",
   "single_sheet_name_pattern": "Laporan_Harian_Produksi_Distribusi_{date}",
   "enabled": true,
-  "spreadsheet_id": "",
   "metadata": {
+    "template_spreadsheet_id": "",
+    "target_folder_id": "",
+    "monthly_filename_pattern": "Laporan Produksi dan Distribusi - {month_year}",
     "template_sheet_name": "template_produksi_distribusi",
     "date_cell": { "row": 5, "col": 3 },
     "zero_as_off": false,

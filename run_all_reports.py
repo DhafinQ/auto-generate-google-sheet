@@ -3,6 +3,8 @@ import glob
 import json
 import os
 from dotenv import load_dotenv
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
 import gspread
 import numpy as np
 import pandas as pd
@@ -85,6 +87,72 @@ def group_contiguous_columns(column_mappings):
   return groups
 
 
+def get_or_create_monthly_spreadsheet(gc, metadata, target_date):
+  """Mencari file bulanan.
+
+  Jika belum ada, buat spreadsheet baru via gspread/Sheets API.
+  """
+  template_spreadsheet_id = metadata.get("template_spreadsheet_id")
+  target_folder_id = metadata.get("target_folder_id")
+  monthly_pattern = metadata.get(
+      "monthly_filename_pattern", "Laporan - {month_year}"
+  )
+
+  # Format Nama Bulan & Tahun
+  month_name = BULAN_INDONESIA.get(target_date.month, "")
+  month_year_str = f"{month_name} {target_date.year}"
+  target_filename = monthly_pattern.replace("{month_year}", month_year_str)
+
+  creds = service_account.Credentials.from_service_account_file(
+      CREDENTIALS_FILE, scopes=["https://www.googleapis.com/auth/drive"]
+    )
+  
+  drive_service = build("drive", "v3", credentials=creds)
+
+  # 1. Lookup apakah file spreadsheet bulan ini sudah ada
+  query = (
+      f"name = '{target_filename}' and '{target_folder_id}' in parents and"
+      " mimeType = 'application/vnd.google-apps.spreadsheet' and trashed ="
+      " false"
+  )
+  results = (
+      drive_service.files().list(q=query, fields="files(id, name)").execute()
+  )
+  files = results.get("files", [])
+
+  if files:
+    found_id = files[0]["id"]
+    print(
+        f"    📁 Found existing monthly file: '{target_filename}' (ID:"
+        f" {found_id})"
+    )
+    return found_id
+
+  # 2. Jika BELUM ADA: Buat Spreadsheet baru secara native via gspread
+  print(f"    ✨ Membuka/Membuat File Bulanan Baru -> '{target_filename}'...")
+
+  # Buat Spreadsheet Baru di Folder Target
+  new_sh = gc.create(target_filename, folder_id=target_folder_id)
+  new_id = new_sh.id
+
+  # Copy Tab Template dari Master Template ke File Baru Ini
+  master_sh = gc.open_by_key(template_spreadsheet_id)
+  template_sheet_name = metadata.get("template_sheet_name")
+
+  template_ws = master_sh.worksheet(template_sheet_name)
+  # Duplikasi tab template langsung ke file spreadsheet baru
+  template_ws.copy_to(new_id)
+
+  # Rapikan: Hapus 'Sheet1' bawaan spreadsheet baru
+  try:
+    default_sheet = new_sh.worksheet("Sheet1")
+    new_sh.del_worksheet(default_sheet)
+  except Exception:
+    pass
+
+  print(f"    🎉 File bulanan berhasil dibuat & disiapkan! (ID: {new_id})")
+  return new_id
+
 def process_fixed_snapshot_data(
     engine, column_mappings, metadata, yesterday_str, today_str
 ):
@@ -94,8 +162,8 @@ def process_fixed_snapshot_data(
           "start_time": "07:00",
           "end_time": "07:00",
           "interval_step_hours": 1,
-          "buffer_minutes": 20,
-      }
+          "buffer_minutes": 10,
+      },
   )
   zero_as_off = metadata.get("zero_as_off", False)
 
@@ -110,9 +178,9 @@ def process_fixed_snapshot_data(
   start_cutoff = (
       pd.to_datetime(start_dt_str) - timedelta(minutes=buffer_minutes)
   ).strftime("%Y-%m-%d %H:%M:%S")
-  end_cutoff = (pd.to_datetime(end_dt_str) + timedelta(minutes=buffer_minutes)).strftime(
-      "%Y-%m-%d %H:%M:%S"
-  )
+  end_cutoff = (
+      pd.to_datetime(end_dt_str) + timedelta(minutes=buffer_minutes)
+  ).strftime("%Y-%m-%d %H:%M:%S")
 
   target_dt = pd.date_range(
       start=start_dt_str, end=end_dt_str, freq=f"{step_hours}h"
@@ -209,43 +277,45 @@ def process_report_config(config_file_path, engine, gc):
   with open(config_file_path, "r") as f:
     config = json.load(f)
 
-  spreadsheet_id = config.get("spreadsheet_id")
-  if not spreadsheet_id:
-    raise ValueError("`spreadsheet_id` tidak ditemukan atau kosong di JSON!")
-
   column_mappings = config.get("fixed_column_mapping", [])
   metadata = config.get("metadata", {})
-  sheet_pattern = config.get("single_sheet_name_pattern", "Laporan_{date}")
+  sheet_pattern = config.get("single_sheet_name_pattern", "{date}")
   template_name = metadata.get("template_sheet_name", "template_sheet")
   date_cell = metadata.get("date_cell", {"row": 5, "col": 3})
 
   now = datetime.now()
-  today_date = now.date()
+  today_date = now.date() - timedelta(days=3)
   yesterday_date = today_date - timedelta(days=1)
   today_str = today_date.strftime("%Y-%m-%d")
   yesterday_str = yesterday_date.strftime("%Y-%m-%d")
 
+  # 1. Dynamic Lookup/Create Monthly Spreadsheet ID
+  monthly_spreadsheet_id = get_or_create_monthly_spreadsheet(
+      gc, metadata, yesterday_date
+  )
+
+  # 2. Target Sheet Harian
   target_sheet_name = sheet_pattern.replace("{date}", yesterday_str)
 
-  sh = gc.open_by_key(spreadsheet_id)
+  sh = gc.open_by_key(monthly_spreadsheet_id)
 
   try:
     template_ws = sh.worksheet(template_name)
   except gspread.exceptions.WorksheetNotFound:
     raise ValueError(
-        f"Template '{template_name}' tidak ditemukan di Google Sheets!"
+        f"Template sheet '{template_name}' tidak ditemukan di Spreadsheet!"
     )
 
-  # Hapus sheet lama jika sudah ada
+  # Hapus sheet harian lama jika ada (re-run)
   try:
     sh.del_worksheet(sh.worksheet(target_sheet_name))
   except gspread.exceptions.WorksheetNotFound:
     pass
 
-  # Duplikasi Template
+  # Duplikasi Tab Template
   new_ws = template_ws.duplicate(new_sheet_name=target_sheet_name)
 
-  # Update Tanggal di Kop
+  # Update Tanggal Kop Surat
   hari = HARI_INDONESIA.get(yesterday_date.strftime("%A"), "")
   bulan = BULAN_INDONESIA.get(yesterday_date.month, "")
   formatted_date = f"{hari}, {yesterday_date.day} {bulan} {yesterday_date.year}"
@@ -253,12 +323,12 @@ def process_report_config(config_file_path, engine, gc):
       date_cell.get("row", 5), date_cell.get("col", 3), formatted_date
   )
 
-  # Query & Process Data MySQL
+  # Query & Merging Data MySQL
   df_data = process_fixed_snapshot_data(
       engine, column_mappings, metadata, yesterday_str, today_str
   )
 
-  # Batch Update per Grup Kolom
+  # Batch Update
   groups = group_contiguous_columns(column_mappings)
   for g in groups:
     start_c, end_c = g[0]["target_col_letter"], g[-1]["target_col_letter"]
@@ -281,10 +351,10 @@ def main():
   engine = get_db_connection()
   gc = gspread.service_account(filename=CREDENTIALS_FILE)
 
-  config_folder = "configs"
+  BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+  config_folder = os.path.join(BASE_DIR, "configs")
   json_files = glob.glob(os.path.join(config_folder, "*.json"))
 
-  # Filter file yang bukan example
   valid_files = [
       f for f in json_files if not os.path.basename(f).startswith("example")
   ]
@@ -308,7 +378,7 @@ def main():
   for idx, (filepath, cfg) in enumerate(active_reports, start=1):
     report_name = cfg.get("report_name", os.path.basename(filepath))
     print(f"[{idx}/{len(active_reports)}] Memproses: '{report_name}'...")
-    print(f"    📄 Config: {filepath}")
+    print(f"    📄 Config: {os.path.basename(filepath)}")
 
     try:
       process_report_config(filepath, engine, gc)
@@ -319,7 +389,6 @@ def main():
       print(f"    ⚠️ Detail Error: {e}\n")
       summary.append((report_name, "FAILED"))
 
-  # Summary akhir
   print("=" * 70)
   print("📊 RINGKASAN EKSEKUSI LAPORAN HARIAN")
   print("=" * 70)
