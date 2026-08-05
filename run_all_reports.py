@@ -382,7 +382,7 @@ def process_report_config(config_file_path, engine, gc):
   date_cell = metadata.get("date_cell", {"row": 5, "col": 3})
 
   now = datetime.now()
-  today_date = now.date() - timedelta(days=2)
+  today_date = now.date()
   yesterday_date = today_date - timedelta(days=1)
   today_str = today_date.strftime("%Y-%m-%d")
   yesterday_str = yesterday_date.strftime("%Y-%m-%d")
