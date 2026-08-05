@@ -59,6 +59,14 @@ def col_letter_to_index(col_letter):
   return num
 
 
+def index_to_col_letter(col_idx):
+  result = ""
+  while col_idx > 0:
+    col_idx, remainder = divmod(col_idx - 1, 26)
+    result = chr(65 + remainder) + result
+  return result
+
+
 def group_contiguous_columns(column_mappings):
   if not column_mappings:
     return []
@@ -88,28 +96,22 @@ def group_contiguous_columns(column_mappings):
 
 
 def get_or_create_monthly_spreadsheet(gc, metadata, target_date):
-  """Mencari file bulanan.
-
-  Jika belum ada, buat spreadsheet baru via gspread/Sheets API.
-  """
+  """Mencari file bulanan. Jika belum ada, buat spreadsheet baru via gspread/Sheets API."""
   template_spreadsheet_id = metadata.get("template_spreadsheet_id")
   target_folder_id = metadata.get("target_folder_id")
   monthly_pattern = metadata.get(
       "monthly_filename_pattern", "Laporan - {month_year}"
   )
 
-  # Format Nama Bulan & Tahun
   month_name = BULAN_INDONESIA.get(target_date.month, "")
   month_year_str = f"{month_name} {target_date.year}"
   target_filename = monthly_pattern.replace("{month_year}", month_year_str)
 
   creds = service_account.Credentials.from_service_account_file(
       CREDENTIALS_FILE, scopes=["https://www.googleapis.com/auth/drive"]
-    )
-  
+  )
   drive_service = build("drive", "v3", credentials=creds)
 
-  # 1. Lookup apakah file spreadsheet bulan ini sudah ada
   query = (
       f"name = '{target_filename}' and '{target_folder_id}' in parents and"
       " mimeType = 'application/vnd.google-apps.spreadsheet' and trashed ="
@@ -128,22 +130,17 @@ def get_or_create_monthly_spreadsheet(gc, metadata, target_date):
     )
     return found_id
 
-  # 2. Jika BELUM ADA: Buat Spreadsheet baru secara native via gspread
   print(f"    ✨ Membuka/Membuat File Bulanan Baru -> '{target_filename}'...")
 
-  # Buat Spreadsheet Baru di Folder Target
   new_sh = gc.create(target_filename, folder_id=target_folder_id)
   new_id = new_sh.id
 
-  # Copy Tab Template dari Master Template ke File Baru Ini
   master_sh = gc.open_by_key(template_spreadsheet_id)
   template_sheet_name = metadata.get("template_sheet_name")
 
   template_ws = master_sh.worksheet(template_sheet_name)
-  # Duplikasi tab template langsung ke file spreadsheet baru
   template_ws.copy_to(new_id)
 
-  # Rapikan: Hapus 'Sheet1' bawaan spreadsheet baru
   try:
     default_sheet = new_sh.worksheet("Sheet1")
     new_sh.del_worksheet(default_sheet)
@@ -153,9 +150,14 @@ def get_or_create_monthly_spreadsheet(gc, metadata, target_date):
   print(f"    🎉 File bulanan berhasil dibuat & disiapkan! (ID: {new_id})")
   return new_id
 
+
 def process_fixed_snapshot_data(
     engine, column_mappings, metadata, yesterday_str, today_str
 ):
+  """Memproses pemetaan kolom snapshot per jam (statis)."""
+  if not column_mappings:
+    return pd.DataFrame()
+
   intervals = metadata.get(
       "intervals",
       {
@@ -272,19 +274,115 @@ def process_fixed_snapshot_data(
   return df_master
 
 
+def process_dynamic_event_data(
+    engine, event_config, yesterday_str, today_str, metadata
+):
+  """Memproses tabel custom/dynamic event (misal Backwash Filter) dari multi tabel."""
+  intervals = metadata.get(
+      "intervals",
+      {
+          "start_time": "07:00",
+          "end_time": "07:00",
+      },
+  )
+  start_time = intervals.get("start_time", "07:00")
+  end_time = intervals.get("end_time", "07:00")
+
+  start_cutoff = f"{yesterday_str} {start_time}:00"
+  end_cutoff = f"{today_str} {end_time}:00"
+
+  tables = event_config.get("tables_pattern", [])
+  output_cols_cfg = event_config.get("output_columns", [])
+
+  inspector = inspect(engine)
+  all_db_tables = inspector.get_table_names()
+
+  all_events = []
+
+  for tbl in tables:
+    matched_table = next(
+        (t for t in all_db_tables if t.lower() == tbl.lower()), None
+    )
+    if not matched_table:
+      continue
+
+    # Ekstrak WTP dan Nomor Filter dari nama tabel (misal "250_FT1_BW_IND")
+    parts = tbl.split("_")
+    wtp_val = parts[0] if len(parts) > 0 else "-"
+    filter_val = parts[1] if len(parts) > 1 else "-"
+
+    query = f"""
+            SELECT * FROM `{matched_table}` 
+            WHERE `LocalTimestamp` >= '{start_cutoff}' 
+              AND `LocalTimestamp` <= '{end_cutoff}'
+            ORDER BY `LocalTimestamp` ASC
+        """
+    try:
+      df_db = pd.read_sql(query, engine)
+      if df_db.empty:
+        continue
+
+      for _, row in df_db.iterrows():
+        row_data = []
+        raw_ts = row["LocalTimestamp"]
+
+        for col_cfg in output_cols_cfg:
+          c_type = col_cfg.get("type")
+
+          if c_type == "TIMESTAMP_FORMAT":
+            dt = pd.to_datetime(raw_ts)
+            row_data.append(dt.strftime(col_cfg.get("format", "%H:%M")))
+
+          elif c_type == "TABLE_NAME_SPLIT":
+            idx = col_cfg.get("index", 0)
+            row_data.append(wtp_val if idx == 0 else filter_val)
+
+          elif c_type == "DB_COLUMN":
+            col_name = col_cfg.get("column")
+            val = row.get(col_name, "-")
+            dec = col_cfg.get("decimals", 0)
+            if pd.notnull(val) and val != "-":
+              try:
+                row_data.append(int(val) if dec == 0 else round(float(val), dec))
+              except ValueError:
+                row_data.append(val)
+            else:
+              row_data.append("-")
+
+          elif c_type == "EXPRESSION_SUM":
+            sum_cols = col_cfg.get("sum_columns", [])
+            total_sum = sum([float(row.get(c, 0) or 0) for c in sum_cols])
+            dec = col_cfg.get("decimals", 0)
+            row_data.append(int(total_sum) if dec == 0 else round(total_sum, dec))
+
+          else:
+            row_data.append("-")
+
+        # Simpan tuple: (LocalTimestamp murni untuk sorting, list data sel)
+        all_events.append((pd.to_datetime(raw_ts), row_data))
+
+    except Exception as e:
+      print(f"❌ Error query event tabel `{tbl}`: {e}")
+
+  # Urutkan seluruh kejadian berdasarkan urutan waktu (Timestamp ASC)
+  all_events.sort(key=lambda x: x[0])
+  return [item[1] for item in all_events]
+
+
 def process_report_config(config_file_path, engine, gc):
-  """Memproses 1 file konfigurasi JSON."""
+  """Memproses 1 file konfigurasi JSON (Mendukung Fixed & Dynamic Event Mapping)."""
   with open(config_file_path, "r") as f:
     config = json.load(f)
 
   column_mappings = config.get("fixed_column_mapping", [])
+  dynamic_event_mappings = config.get("dynamic_event_mapping", [])
   metadata = config.get("metadata", {})
   sheet_pattern = config.get("single_sheet_name_pattern", "{date}")
   template_name = metadata.get("template_sheet_name", "template_sheet")
   date_cell = metadata.get("date_cell", {"row": 5, "col": 3})
 
   now = datetime.now()
-  today_date = now.date()
+  today_date = now.date() - timedelta(days=2)
   yesterday_date = today_date - timedelta(days=1)
   today_str = today_date.strftime("%Y-%m-%d")
   yesterday_str = yesterday_date.strftime("%Y-%m-%d")
@@ -323,21 +421,45 @@ def process_report_config(config_file_path, engine, gc):
       date_cell.get("row", 5), date_cell.get("col", 3), formatted_date
   )
 
-  # Query & Merging Data MySQL
-  df_data = process_fixed_snapshot_data(
-      engine, column_mappings, metadata, yesterday_str, today_str
-  )
+  # -------------------------------------------------------------
+  # A. PROSES FIXED COLUMN MAPPING (Snapshot Per Jam)
+  # -------------------------------------------------------------
+  if column_mappings:
+    df_data = process_fixed_snapshot_data(
+        engine, column_mappings, metadata, yesterday_str, today_str
+    )
+    if not df_data.empty:
+      groups = group_contiguous_columns(column_mappings)
+      for g in groups:
+        start_c, end_c = g[0]["target_col_letter"], g[-1]["target_col_letter"]
+        start_r = int(g[0]["target_row"])
+        end_r = start_r + len(df_data) - 1
+        range_str = f"{start_c}{start_r}:{end_c}{end_r}"
 
-  # Batch Update
-  groups = group_contiguous_columns(column_mappings)
-  for g in groups:
-    start_c, end_c = g[0]["target_col_letter"], g[-1]["target_col_letter"]
-    start_r = int(g[0]["target_row"])
-    end_r = start_r + len(df_data) - 1
-    range_str = f"{start_c}{start_r}:{end_c}{end_r}"
+        keys = [f"COL_{item['target_column_index']}" for item in g]
+        new_ws.update(values=df_data[keys].values.tolist(), range_name=range_str)
 
-    keys = [f"COL_{item['target_column_index']}" for item in g]
-    new_ws.update(values=df_data[keys].values.tolist(), range_name=range_str)
+  # -------------------------------------------------------------
+  # B. PROSES DYNAMIC EVENT MAPPING (Backwash Filter Event)
+  # -------------------------------------------------------------
+  if dynamic_event_mappings:
+    for event_cfg in dynamic_event_mappings:
+      event_rows = process_dynamic_event_data(
+          engine, event_cfg, yesterday_str, today_str, metadata
+      )
+
+      if event_rows:
+        start_r = int(event_cfg.get("target_start_row", 10))
+        end_r = start_r + len(event_rows) - 1
+        start_col = event_cfg.get("columns_start_letter", "A")
+
+        # Hitung huruf kolom akhir secara dinamis
+        end_col_idx = col_letter_to_index(start_col) + len(event_rows[0]) - 1
+        end_col = index_to_col_letter(end_col_idx)
+
+        range_str = f"{start_col}{start_r}:{end_col}{end_r}"
+        new_ws.update(values=event_rows, range_name=range_str)
+        print(f"    ✨ Log Event '{event_cfg.get('event_name')}' berhasil ditulis: {len(event_rows)} baris!")
 
 
 def main():
