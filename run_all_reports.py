@@ -241,6 +241,7 @@ def process_fixed_snapshot_data(
           left_on="TargetTime",
           right_on="LocalTimestamp",
           direction="backward",
+          tolerance=pd.Timedelta(minutes=buffer_minutes),
       )
 
       for real_col, idx, decimals in valid_mappings:
@@ -382,7 +383,7 @@ def process_report_config(config_file_path, engine, gc):
   date_cell = metadata.get("date_cell", {"row": 5, "col": 3})
 
   now = datetime.now()
-  today_date = now.date()
+  today_date = (now + timedelta(days=1)).date()
   yesterday_date = today_date - timedelta(days=1)
   today_str = today_date.strftime("%Y-%m-%d")
   yesterday_str = yesterday_date.strftime("%Y-%m-%d")
