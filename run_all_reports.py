@@ -234,14 +234,19 @@ def process_fixed_snapshot_data(
       if df_db.empty:
         continue
       df_db["LocalTimestamp"] = pd.to_datetime(df_db["LocalTimestamp"])
+      df_db = df_db.sort_values(by="LocalTimestamp").reset_index(drop=True)
 
+      df_targets["TargetTime"] = pd.to_datetime(df_targets["TargetTime"])
+      df_targets = df_targets.sort_values(by="TargetTime").reset_index(drop=True)
+
+      # Merge Asof
       df_snapshot = pd.merge_asof(
           df_targets,
           df_db,
           left_on="TargetTime",
           right_on="LocalTimestamp",
           direction="backward",
-          tolerance=pd.Timedelta(minutes=buffer_minutes),
+          tolerance=pd.Timedelta(minutes=buffer_minutes)
       )
 
       for real_col, idx, decimals in valid_mappings:
@@ -382,15 +387,20 @@ def process_report_config(config_file_path, engine, gc):
   template_name = metadata.get("template_sheet_name", "template_sheet")
   date_cell = metadata.get("date_cell", {"row": 5, "col": 3})
 
-  now = datetime.now()
-  today_date = (now + timedelta(days=1)).date()
-  yesterday_date = today_date - timedelta(days=1)
-  today_str = today_date.strftime("%Y-%m-%d")
-  yesterday_str = yesterday_date.strftime("%Y-%m-%d")
+  now = datetime.now() 
+  if now.hour < 7:
+    start_date = (now - timedelta(days=1)).date()
+    end_date = now.date()
+  else:
+    start_date = now.date()
+    end_date = (now + timedelta(days=1)).date()
+
+  yesterday_str = start_date.strftime("%Y-%m-%d")
+  today_str = end_date.strftime("%Y-%m-%d")
 
   # 1. Dynamic Lookup/Create Monthly Spreadsheet ID
   monthly_spreadsheet_id = get_or_create_monthly_spreadsheet(
-      gc, metadata, yesterday_date
+      gc, metadata, end_date
   )
 
   # 2. Target Sheet Harian
@@ -415,9 +425,9 @@ def process_report_config(config_file_path, engine, gc):
   new_ws = template_ws.duplicate(new_sheet_name=target_sheet_name)
 
   # Update Tanggal Kop Surat
-  hari = HARI_INDONESIA.get(yesterday_date.strftime("%A"), "")
-  bulan = BULAN_INDONESIA.get(yesterday_date.month, "")
-  formatted_date = f"{hari}, {yesterday_date.day} {bulan} {yesterday_date.year}"
+  hari = HARI_INDONESIA.get(end_date.strftime("%A"), "")
+  bulan = BULAN_INDONESIA.get(end_date.month, "")
+  formatted_date = f"{hari}, {end_date.day} {bulan} {end_date.year}"
   new_ws.update_cell(
       date_cell.get("row", 5), date_cell.get("col", 3), formatted_date
   )
