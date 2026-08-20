@@ -388,7 +388,7 @@ def process_report_config(config_file_path, engine, gc):
   date_cell = metadata.get("date_cell", {"row": 5, "col": 3})
 
   now = datetime.now() 
-  if now.hour < 7:
+  if now.hour <= 7:
     start_date = (now - timedelta(days=1)).date()
     end_date = now.date()
   else:
@@ -425,9 +425,9 @@ def process_report_config(config_file_path, engine, gc):
   new_ws = template_ws.duplicate(new_sheet_name=target_sheet_name)
 
   # Update Tanggal Kop Surat
-  hari = HARI_INDONESIA.get(end_date.strftime("%A"), "")
-  bulan = BULAN_INDONESIA.get(end_date.month, "")
-  formatted_date = f"{hari}, {end_date.day} {bulan} {end_date.year}"
+  hari = HARI_INDONESIA.get(start_date.strftime("%A"), "")
+  bulan = BULAN_INDONESIA.get(start_date.month, "")
+  formatted_date = f"{hari}, {start_date.day} {bulan} {start_date.year}"
   new_ws.update_cell(
       date_cell.get("row", 5), date_cell.get("col", 3), formatted_date
   )
