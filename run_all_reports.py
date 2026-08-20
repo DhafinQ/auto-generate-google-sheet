@@ -376,102 +376,105 @@ def process_dynamic_event_data(
 
 
 def process_report_config(config_file_path, engine, gc):
-  """Memproses 1 file konfigurasi JSON (Mendukung Fixed & Dynamic Event Mapping)."""
   with open(config_file_path, "r") as f:
     config = json.load(f)
 
+  metadata = config.get("metadata", {})
   column_mappings = config.get("fixed_column_mapping", [])
   dynamic_event_mappings = config.get("dynamic_event_mapping", [])
-  metadata = config.get("metadata", {})
   sheet_pattern = config.get("single_sheet_name_pattern", "{date}")
   template_name = metadata.get("template_sheet_name", "template_sheet")
   date_cell = metadata.get("date_cell", {"row": 5, "col": 3})
 
-  now = datetime.now() 
-  if now.hour <= 7:
-    start_date = (now - timedelta(days=1)).date()
-    end_date = now.date()
+  now = datetime.now()
+
+  # --- TENTUKAN SIKLUS LAPORAN YANG HARUS DIJALANKAN ---
+  cycles = []
+
+  if now.hour == 7:
+    # 1. Tutup shift kemarin (07:00 kemarin s.d. 07:00 hari ini)
+    cycles.append(((now - timedelta(days=1)).date(), now.date()))
+    # 2. Buka shift hari ini (07:00 hari ini s.d. 07:00 besok)
+    cycles.append((now.date(), (now + timedelta(days=1)).date()))
+  elif now.hour < 7:
+    # Jam 00:00 - 06:59: Lanjutkan shift kemarin
+    cycles.append(((now - timedelta(days=1)).date(), now.date()))
   else:
-    start_date = now.date()
-    end_date = (now + timedelta(days=1)).date()
+    # Jam 08:00 - 23:59: Lanjutkan shift hari ini
+    cycles.append((now.date(), (now + timedelta(days=1)).date()))
 
-  yesterday_str = start_date.strftime("%Y-%m-%d")
-  today_str = end_date.strftime("%Y-%m-%d")
+  # --- LOOP EKSEKUSI SIKLUS (Bisa 1x atau 2x jika jam 7 pagi) ---
+  for start_date, end_date in cycles:
+    yesterday_str = start_date.strftime("%Y-%m-%d")
+    today_str = end_date.strftime("%Y-%m-%d")
 
-  # 1. Dynamic Lookup/Create Monthly Spreadsheet ID
-  monthly_spreadsheet_id = get_or_create_monthly_spreadsheet(
-      gc, metadata, end_date
-  )
-
-  # 2. Target Sheet Harian
-  target_sheet_name = sheet_pattern.replace("{date}", yesterday_str)
-
-  sh = gc.open_by_key(monthly_spreadsheet_id)
-
-  try:
-    template_ws = sh.worksheet(template_name)
-  except gspread.exceptions.WorksheetNotFound:
-    raise ValueError(
-        f"Template sheet '{template_name}' tidak ditemukan di Spreadsheet!"
+    # 1. Lookup / Buat Monthly Spreadsheet
+    monthly_spreadsheet_id = get_or_create_monthly_spreadsheet(
+        gc, metadata, start_date
     )
 
-  # Hapus sheet harian lama jika ada (re-run)
-  try:
-    sh.del_worksheet(sh.worksheet(target_sheet_name))
-  except gspread.exceptions.WorksheetNotFound:
-    pass
+    # 2. Target Sheet Harian
+    target_sheet_name = sheet_pattern.replace("{date}", yesterday_str)
+    sh = gc.open_by_key(monthly_spreadsheet_id)
 
-  # Duplikasi Tab Template
-  new_ws = template_ws.duplicate(new_sheet_name=target_sheet_name)
-
-  # Update Tanggal Kop Surat
-  hari = HARI_INDONESIA.get(start_date.strftime("%A"), "")
-  bulan = BULAN_INDONESIA.get(start_date.month, "")
-  formatted_date = f"{hari}, {start_date.day} {bulan} {start_date.year}"
-  new_ws.update_cell(
-      date_cell.get("row", 5), date_cell.get("col", 3), formatted_date
-  )
-
-  # -------------------------------------------------------------
-  # A. PROSES FIXED COLUMN MAPPING (Snapshot Per Jam)
-  # -------------------------------------------------------------
-  if column_mappings:
-    df_data = process_fixed_snapshot_data(
-        engine, column_mappings, metadata, yesterday_str, today_str
-    )
-    if not df_data.empty:
-      groups = group_contiguous_columns(column_mappings)
-      for g in groups:
-        start_c, end_c = g[0]["target_col_letter"], g[-1]["target_col_letter"]
-        start_r = int(g[0]["target_row"])
-        end_r = start_r + len(df_data) - 1
-        range_str = f"{start_c}{start_r}:{end_c}{end_r}"
-
-        keys = [f"COL_{item['target_column_index']}" for item in g]
-        new_ws.update(values=df_data[keys].values.tolist(), range_name=range_str)
-
-  # -------------------------------------------------------------
-  # B. PROSES DYNAMIC EVENT MAPPING (Backwash Filter Event)
-  # -------------------------------------------------------------
-  if dynamic_event_mappings:
-    for event_cfg in dynamic_event_mappings:
-      event_rows = process_dynamic_event_data(
-          engine, event_cfg, yesterday_str, today_str, metadata
+    try:
+      template_ws = sh.worksheet(template_name)
+    except gspread.exceptions.WorksheetNotFound:
+      raise ValueError(
+          f"Template sheet '{template_name}' tidak ditemukan di Spreadsheet!"
       )
 
-      if event_rows:
-        start_r = int(event_cfg.get("target_start_row", 10))
-        end_r = start_r + len(event_rows) - 1
-        start_col = event_cfg.get("columns_start_letter", "A")
+    # Hapus sheet harian lama jika ada (re-run)
+    try:
+      sh.del_worksheet(sh.worksheet(target_sheet_name))
+    except gspread.exceptions.WorksheetNotFound:
+      pass
 
-        # Hitung huruf kolom akhir secara dinamis
-        end_col_idx = col_letter_to_index(start_col) + len(event_rows[0]) - 1
-        end_col = index_to_col_letter(end_col_idx)
+    # Duplikasi Tab Template
+    new_ws = template_ws.duplicate(new_sheet_name=target_sheet_name)
 
-        range_str = f"{start_col}{start_r}:{end_col}{end_r}"
-        new_ws.update(values=event_rows, range_name=range_str)
-        print(f"    ✨ Log Event '{event_cfg.get('event_name')}' berhasil ditulis: {len(event_rows)} baris!")
+    # Update Tanggal Kop Surat
+    hari = HARI_INDONESIA.get(start_date.strftime("%A"), "")
+    bulan = BULAN_INDONESIA.get(start_date.month, "")
+    formatted_date = f"{hari}, {start_date.day} {bulan} {start_date.year}"
+    new_ws.update_cell(
+        date_cell.get("row", 5), date_cell.get("col", 3), formatted_date
+    )
 
+    # A. Fixed Column Mapping
+    if column_mappings:
+      df_data = process_fixed_snapshot_data(
+          engine, column_mappings, metadata, yesterday_str, today_str
+      )
+      if not df_data.empty:
+        groups = group_contiguous_columns(column_mappings)
+        for g in groups:
+          start_c, end_c = g[0]["target_col_letter"], g[-1]["target_col_letter"]
+          start_r = int(g[0]["target_row"])
+          end_r = start_r + len(df_data) - 1
+          range_str = f"{start_c}{start_r}:{end_c}{end_r}"
+
+          keys = [f"COL_{item['target_column_index']}" for item in g]
+          new_ws.update(
+              values=df_data[keys].values.tolist(), range_name=range_str
+          )
+
+    # B. Dynamic Event Mapping
+    if dynamic_event_mappings:
+      for event_cfg in dynamic_event_mappings:
+        event_rows = process_dynamic_event_data(
+            engine, event_cfg, yesterday_str, today_str, metadata
+        )
+        if event_rows:
+          start_r = int(event_cfg.get("target_start_row", 10))
+          end_r = start_r + len(event_rows) - 1
+          start_col = event_cfg.get("columns_start_letter", "A")
+
+          end_col_idx = col_letter_to_index(start_col) + len(event_rows[0]) - 1
+          end_col = index_to_col_letter(end_col_idx)
+
+          range_str = f"{start_col}{start_r}:{end_col}{end_r}"
+          new_ws.update(values=event_rows, range_name=range_str)
 
 def main():
   print("=" * 70)
