@@ -8,7 +8,7 @@ from googleapiclient.discovery import build
 import gspread
 import numpy as np
 import pandas as pd
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, text
 
 # 1. Load Environment Variables Global (.env)
 load_dotenv()
@@ -18,6 +18,12 @@ DB_PASS = os.getenv("DB_PASS", "")
 DB_NAME = os.getenv("DB_NAME", "db_sensor")
 DB_PORT = os.getenv("DB_PORT", 3306)
 CREDENTIALS_FILE = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
+STATE_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "events_state.json"
+)
+
+DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
+DEBUG_FOLDER = os.getenv("DEBUG_FOLDER", "")
 
 # Mapping Bahasa Indonesia untuk Hari & Bulan
 HARI_INDONESIA = {
@@ -98,7 +104,12 @@ def group_contiguous_columns(column_mappings):
 def get_or_create_monthly_spreadsheet(gc, metadata, target_date):
   """Mencari file bulanan. Jika belum ada, buat spreadsheet baru via gspread/Sheets API."""
   template_spreadsheet_id = metadata.get("template_spreadsheet_id")
-  target_folder_id = metadata.get("target_folder_id")
+
+  if DEBUG_MODE and DEBUG_FOLDER:
+    target_folder_id = DEBUG_FOLDER
+  else:
+    target_folder_id = metadata.get("target_folder_id")
+  
   monthly_pattern = metadata.get(
       "monthly_filename_pattern", "Laporan - {month_year}"
   )
@@ -124,10 +135,6 @@ def get_or_create_monthly_spreadsheet(gc, metadata, target_date):
 
   if files:
     found_id = files[0]["id"]
-    print(
-        f"    📁 Found existing monthly file: '{target_filename}' (ID:"
-        f" {found_id})"
-    )
     return found_id
 
   print(f"    ✨ Membuka/Membuat File Bulanan Baru -> '{target_filename}'...")
@@ -149,6 +156,44 @@ def get_or_create_monthly_spreadsheet(gc, metadata, target_date):
 
   print(f"    🎉 File bulanan berhasil dibuat & disiapkan! (ID: {new_id})")
   return new_id
+
+
+def load_event_state():
+  if os.path.exists(STATE_FILE):
+    try:
+      with open(STATE_FILE, "r") as f:
+        return json.load(f)
+    except Exception:
+      return {}
+  return {}
+
+
+def save_event_state(state):
+  try:
+    with open(STATE_FILE, "w") as f:
+      json.dump(state, f, indent=2)
+  except Exception as e:
+    print(f"⚠️ Gagal menyimpan state event: {e}")
+
+
+def get_event_record_count(engine, tables, start_cutoff, end_cutoff):
+  """Menghitung total record event dari seluruh tabel untuk deteksi perubahan cepat."""
+  inspector = inspect(engine)
+  all_db_tables = [t.lower() for t in inspector.get_table_names()]
+
+  valid_tables = [tbl for tbl in tables if tbl.lower() in all_db_tables]
+  if not valid_tables:
+    return 0
+
+  union_queries = [
+      f"SELECT COUNT(*) as cnt FROM `{tbl}` WHERE `LocalTimestamp` >= '{start_cutoff}' AND `LocalTimestamp` <= '{end_cutoff}'"
+      for tbl in valid_tables
+  ]
+  total_query = f"SELECT SUM(cnt) as total_count FROM ({' UNION ALL '.join(union_queries)}) as t"
+
+  with engine.connect() as conn:
+    result = conn.execute(text(total_query)).fetchone()
+    return int(result[0] or 0) if result else 0
 
 
 def process_fixed_snapshot_data(
@@ -239,7 +284,6 @@ def process_fixed_snapshot_data(
       df_targets["TargetTime"] = pd.to_datetime(df_targets["TargetTime"])
       df_targets = df_targets.sort_values(by="TargetTime").reset_index(drop=True)
 
-      # Merge Asof
       df_snapshot = pd.merge_asof(
           df_targets,
           df_db,
@@ -283,7 +327,7 @@ def process_fixed_snapshot_data(
 def process_dynamic_event_data(
     engine, event_config, yesterday_str, today_str, metadata
 ):
-  """Memproses tabel custom/dynamic event (misal Backwash Filter) dari multi tabel."""
+  """Memproses tabel dynamic event (Backwash Filter)."""
   intervals = metadata.get(
       "intervals",
       {
@@ -312,7 +356,6 @@ def process_dynamic_event_data(
     if not matched_table:
       continue
 
-    # Ekstrak WTP dan Nomor Filter dari nama tabel (misal "250_FT1_BW_IND")
     parts = tbl.split("_")
     wtp_val = parts[0] if len(parts) > 0 else "-"
     filter_val = parts[1] if len(parts) > 1 else "-"
@@ -364,18 +407,16 @@ def process_dynamic_event_data(
           else:
             row_data.append("-")
 
-        # Simpan tuple: (LocalTimestamp murni untuk sorting, list data sel)
         all_events.append((pd.to_datetime(raw_ts), row_data))
 
     except Exception as e:
       print(f"❌ Error query event tabel `{tbl}`: {e}")
 
-  # Urutkan seluruh kejadian berdasarkan urutan waktu (Timestamp ASC)
   all_events.sort(key=lambda x: x[0])
   return [item[1] for item in all_events]
 
 
-def process_report_config(config_file_path, engine, gc):
+def process_report_config(config_file_path, engine, gc, state):
   with open(config_file_path, "r") as f:
     config = json.load(f)
 
@@ -388,102 +429,105 @@ def process_report_config(config_file_path, engine, gc):
 
   now = datetime.now()
 
-  # --- TENTUKAN SIKLUS LAPORAN YANG HARUS DIJALANKAN ---
+  is_hourly_tick = (now.minute == 58) 
+  # Penentuan Siklus
   cycles = []
-
-  if now.hour == 7:
-    # 1. Tutup shift kemarin (07:00 kemarin s.d. 07:00 hari ini)
+  if now.hour == 6 and is_hourly_tick:
     cycles.append(((now - timedelta(days=1)).date(), now.date()))
-    # 2. Buka shift hari ini (07:00 hari ini s.d. 07:00 besok)
     cycles.append((now.date(), (now + timedelta(days=1)).date()))
   elif now.hour < 7:
-    # Jam 00:00 - 06:59: Lanjutkan shift kemarin
     cycles.append(((now - timedelta(days=1)).date(), now.date()))
   else:
-    # Jam 08:00 - 23:59: Lanjutkan shift hari ini
     cycles.append((now.date(), (now + timedelta(days=1)).date()))
 
-  # --- LOOP EKSEKUSI SIKLUS (Bisa 1x atau 2x jika jam 7 pagi) ---
   for start_date, end_date in cycles:
     yesterday_str = start_date.strftime("%Y-%m-%d")
     today_str = end_date.strftime("%Y-%m-%d")
-
-    # 1. Lookup / Buat Monthly Spreadsheet
-    monthly_spreadsheet_id = get_or_create_monthly_spreadsheet(
-        gc, metadata, start_date
-    )
-
-    # 2. Target Sheet Harian
     target_sheet_name = sheet_pattern.replace("{date}", yesterday_str)
+
+    # Deteksi perubahan data event sebelum menyentuh Google Sheets
+    event_tasks_to_run = []
+    intervals = metadata.get("intervals", {"start_time": "07:00", "end_time": "07:00"})
+    start_cutoff = f"{yesterday_str} {intervals.get('start_time', '07:00')}:00"
+    end_cutoff = f"{today_str} {intervals.get('end_time', '07:00')}:00"
+
+    for event_cfg in dynamic_event_mappings:
+      event_key = f"{os.path.basename(config_file_path)}_{yesterday_str}_{event_cfg.get('event_name', 'event')}"
+      current_count = get_event_record_count(engine, event_cfg.get("tables_pattern", []), start_cutoff, end_cutoff)
+      last_count = state.get(event_key, -1)
+
+      if is_hourly_tick or current_count != last_count:
+        event_tasks_to_run.append((event_cfg, event_key, current_count))
+
+    # Jika bukan tick jam-jaman DAN tidak ada data event baru, skip Google Sheets API
+    if not is_hourly_tick and not event_tasks_to_run:
+      continue
+
+    # Akses Google Sheet
+    monthly_spreadsheet_id = get_or_create_monthly_spreadsheet(gc, metadata, start_date)
     sh = gc.open_by_key(monthly_spreadsheet_id)
 
+    sheet_exists = True
     try:
-      template_ws = sh.worksheet(template_name)
+      ws = sh.worksheet(target_sheet_name)
     except gspread.exceptions.WorksheetNotFound:
-      raise ValueError(
-          f"Template sheet '{template_name}' tidak ditemukan di Spreadsheet!"
-      )
+      sheet_exists = False
 
-    # Hapus sheet harian lama jika ada (re-run)
-    try:
-      sh.del_worksheet(sh.worksheet(target_sheet_name))
-    except gspread.exceptions.WorksheetNotFound:
-      pass
+    # Buat Sheet Baru jika belum ada atau saat pergantian jam (hourly tick)
+    if not sheet_exists or is_hourly_tick:
+      try:
+        template_ws = sh.worksheet(template_name)
+      except gspread.exceptions.WorksheetNotFound:
+        raise ValueError(f"Template sheet '{template_name}' tidak ditemukan di Spreadsheet!")
 
-    # Duplikasi Tab Template
-    new_ws = template_ws.duplicate(new_sheet_name=target_sheet_name)
+      if sheet_exists:
+        try:
+          sh.del_worksheet(ws)
+        except Exception:
+          pass
 
-    # Update Tanggal Kop Surat
-    hari = HARI_INDONESIA.get(start_date.strftime("%A"), "")
-    bulan = BULAN_INDONESIA.get(start_date.month, "")
-    formatted_date = f"{hari}, {start_date.day} {bulan} {start_date.year}"
-    new_ws.update_cell(
-        date_cell.get("row", 5), date_cell.get("col", 3), formatted_date
-    )
+      ws = template_ws.duplicate(new_sheet_name=target_sheet_name)
 
-    # A. Fixed Column Mapping
-    if column_mappings:
-      df_data = process_fixed_snapshot_data(
-          engine, column_mappings, metadata, yesterday_str, today_str
-      )
-      if not df_data.empty:
-        groups = group_contiguous_columns(column_mappings)
-        for g in groups:
-          start_c, end_c = g[0]["target_col_letter"], g[-1]["target_col_letter"]
-          start_r = int(g[0]["target_row"])
-          end_r = start_r + len(df_data) - 1
-          range_str = f"{start_c}{start_r}:{end_c}{end_r}"
+      # Update Tanggal Kop Surat
+      hari = HARI_INDONESIA.get(start_date.strftime("%A"), "")
+      bulan = BULAN_INDONESIA.get(start_date.month, "")
+      formatted_date = f"{hari}, {start_date.day} {bulan} {start_date.year}"
+      ws.update_cell(date_cell.get("row", 5), date_cell.get("col", 3), formatted_date)
 
-          keys = [f"COL_{item['target_column_index']}" for item in g]
-          new_ws.update(
-              values=df_data[keys].values.tolist(), range_name=range_str
-          )
+      # Update Data Snapshot Per Jam
+      if column_mappings:
+        df_data = process_fixed_snapshot_data(engine, column_mappings, metadata, yesterday_str, today_str)
+        if not df_data.empty:
+          groups = group_contiguous_columns(column_mappings)
+          for g in groups:
+            start_c, end_c = g[0]["target_col_letter"], g[-1]["target_col_letter"]
+            start_r = int(g[0]["target_row"])
+            end_r = start_r + len(df_data) - 1
+            range_str = f"{start_c}{start_r}:{end_c}{end_r}"
+            keys = [f"COL_{item['target_column_index']}" for item in g]
+            ws.update(values=df_data[keys].values.tolist(), range_name=range_str)
 
-    # B. Dynamic Event Mapping
-    if dynamic_event_mappings:
-      for event_cfg in dynamic_event_mappings:
-        event_rows = process_dynamic_event_data(
-            engine, event_cfg, yesterday_str, today_str, metadata
-        )
-        if event_rows:
-          start_r = int(event_cfg.get("target_start_row", 10))
-          end_r = start_r + len(event_rows) - 1
-          start_col = event_cfg.get("columns_start_letter", "A")
+    # Update Parsial Dynamic Event
+    for event_cfg, event_key, count in event_tasks_to_run:
+      event_rows = process_dynamic_event_data(engine, event_cfg, yesterday_str, today_str, metadata)
+      if event_rows:
+        start_r = int(event_cfg.get("target_start_row", 10))
+        end_r = start_r + len(event_rows) - 1
+        start_col = event_cfg.get("columns_start_letter", "A")
 
-          end_col_idx = col_letter_to_index(start_col) + len(event_rows[0]) - 1
-          end_col = index_to_col_letter(end_col_idx)
+        end_col_idx = col_letter_to_index(start_col) + len(event_rows[0]) - 1
+        end_col = index_to_col_letter(end_col_idx)
 
-          range_str = f"{start_col}{start_r}:{end_col}{end_r}"
-          new_ws.update(values=event_rows, range_name=range_str)
+        range_str = f"{start_col}{start_r}:{end_col}{end_r}"
+        ws.update(values=event_rows, range_name=range_str)
+        print(f"    ⚡ Real-time Event Updated: '{event_cfg.get('event_name')}' ({len(event_rows)} baris)")
+
+      state[event_key] = count
+
 
 def main():
-  print("=" * 70)
-  print(
-      f"🚀 [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] MEMULAI OTOMATISASI"
-      " GENERATOR LAPORAN HARIAN"
-  )
-  print("=" * 70)
-
+  now = datetime.now()
+  print(f"{now}")
   engine = get_db_connection()
   gc = gspread.service_account(filename=CREDENTIALS_FILE)
 
@@ -495,43 +539,18 @@ def main():
       f for f in json_files if not os.path.basename(f).startswith("example")
   ]
 
-  active_reports = []
+  state = load_event_state()
+
   for filepath in valid_files:
     try:
       with open(filepath, "r") as f:
         cfg = json.load(f)
-        if cfg.get("enabled", False):
-          active_reports.append((filepath, cfg))
+      if cfg.get("enabled", False):
+        process_report_config(filepath, engine, gc, state)
     except Exception as e:
-      print(f"⚠️ Warning: Gagal membaca file {filepath}: {e}")
+      print(f"⚠️ Error memproses {os.path.basename(filepath)}: {e}")
 
-  print(
-      f"📋 Ditemukan {len(active_reports)} laporan aktif yang akan diproses.\n"
-  )
-
-  summary = []
-
-  for idx, (filepath, cfg) in enumerate(active_reports, start=1):
-    report_name = cfg.get("report_name", os.path.basename(filepath))
-    print(f"[{idx}/{len(active_reports)}] Memproses: '{report_name}'...")
-    print(f"    📄 Config: {os.path.basename(filepath)}")
-
-    try:
-      process_report_config(filepath, engine, gc)
-      print("    ✅ Berhasil!\n")
-      summary.append((report_name, "SUCCESS"))
-    except Exception as e:
-      print(f"    ❌ Gagal memproses laporan!")
-      print(f"    ⚠️ Detail Error: {e}\n")
-      summary.append((report_name, "FAILED"))
-
-  print("=" * 70)
-  print("📊 RINGKASAN EKSEKUSI LAPORAN HARIAN")
-  print("=" * 70)
-  for name, status in summary:
-    status_icon = "🟢" if status == "SUCCESS" else "🔴"
-    print(f"{status_icon} {name:<50} : {status}")
-  print("=" * 70 + "\n")
+  save_event_state(state)
 
 
 if __name__ == "__main__":
