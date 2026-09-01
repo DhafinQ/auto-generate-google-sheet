@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 import glob
 import json
 import os
+import time
 from dotenv import load_dotenv
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -109,7 +110,7 @@ def get_or_create_monthly_spreadsheet(gc, metadata, target_date):
     target_folder_id = DEBUG_FOLDER
   else:
     target_folder_id = metadata.get("target_folder_id")
-  
+
   monthly_pattern = metadata.get(
       "monthly_filename_pattern", "Laporan - {month_year}"
   )
@@ -290,7 +291,7 @@ def process_fixed_snapshot_data(
           left_on="TargetTime",
           right_on="LocalTimestamp",
           direction="backward",
-          tolerance=pd.Timedelta(minutes=buffer_minutes)
+          tolerance=pd.Timedelta(minutes=buffer_minutes),
       )
 
       for real_col, idx, decimals in valid_mappings:
@@ -429,7 +430,8 @@ def process_report_config(config_file_path, engine, gc, state):
 
   now = datetime.now()
 
-  is_hourly_tick = (now.minute == 58) 
+  is_hourly_tick = (now.minute == 58) or DEBUG_MODE
+
   # Penentuan Siklus
   cycles = []
   if now.hour == 6 and is_hourly_tick:
@@ -488,13 +490,24 @@ def process_report_config(config_file_path, engine, gc, state):
 
       ws = template_ws.duplicate(new_sheet_name=target_sheet_name)
 
-      # Update Tanggal Kop Surat
+      # -------------------------------------------------------------
+      # OPTIMASI BATCH UPDATE (Kop Tanggal + Snapshot Columns)
+      # -------------------------------------------------------------
+      batch_payload = []
+
+      # 1. Masukkan update kop tanggal ke batch payload
       hari = HARI_INDONESIA.get(start_date.strftime("%A"), "")
       bulan = BULAN_INDONESIA.get(start_date.month, "")
       formatted_date = f"{hari}, {start_date.day} {bulan} {start_date.year}"
-      ws.update_cell(date_cell.get("row", 5), date_cell.get("col", 3), formatted_date)
 
-      # Update Data Snapshot Per Jam
+      date_col_letter = index_to_col_letter(date_cell.get("col", 3))
+      date_range_str = f"{date_col_letter}{date_cell.get('row', 5)}"
+      batch_payload.append({
+          "range": date_range_str,
+          "values": [[formatted_date]],
+      })
+
+      # 2. Masukkan semua range snapshot per jam ke batch payload
       if column_mappings:
         df_data = process_fixed_snapshot_data(engine, column_mappings, metadata, yesterday_str, today_str)
         if not df_data.empty:
@@ -505,9 +518,18 @@ def process_report_config(config_file_path, engine, gc, state):
             end_r = start_r + len(df_data) - 1
             range_str = f"{start_c}{start_r}:{end_c}{end_r}"
             keys = [f"COL_{item['target_column_index']}" for item in g]
-            ws.update(values=df_data[keys].values.tolist(), range_name=range_str)
+            
+            batch_payload.append({
+                "range": range_str,
+                "values": df_data[keys].values.tolist(),
+            })
 
-    # Update Parsial Dynamic Event
+      # Kirim SEMUA data snapshot + kop tanggal dalam 1 API call
+      if batch_payload:
+        ws.batch_update(batch_payload)
+
+    # Update Parsial Dynamic Event (Bisa dimasukkan ke batch atau dipanggil langsung)
+    event_batch_payload = []
     for event_cfg, event_key, count in event_tasks_to_run:
       event_rows = process_dynamic_event_data(engine, event_cfg, yesterday_str, today_str, metadata)
       if event_rows:
@@ -519,15 +541,21 @@ def process_report_config(config_file_path, engine, gc, state):
         end_col = index_to_col_letter(end_col_idx)
 
         range_str = f"{start_col}{start_r}:{end_col}{end_r}"
-        ws.update(values=event_rows, range_name=range_str)
+        event_batch_payload.append({
+            "range": range_str,
+            "values": event_rows,
+        })
         print(f"    ⚡ Real-time Event Updated: '{event_cfg.get('event_name')}' ({len(event_rows)} baris)")
 
       state[event_key] = count
 
+    if event_batch_payload:
+      ws.batch_update(event_batch_payload)
+
 
 def main():
   now = datetime.now()
-  print(f"{now}")
+  print(f"🚀 [{now.strftime('%Y-%m-%d %H:%M:%S')}] Menjalankan Engine Laporan...")
   engine = get_db_connection()
   gc = gspread.service_account(filename=CREDENTIALS_FILE)
 
@@ -541,12 +569,15 @@ def main():
 
   state = load_event_state()
 
-  for filepath in valid_files:
+  for idx, filepath in enumerate(valid_files, start=1):
     try:
       with open(filepath, "r") as f:
         cfg = json.load(f)
       if cfg.get("enabled", False):
+        print(f"[{idx}/{len(valid_files)}] Memproses: {os.path.basename(filepath)}")
         process_report_config(filepath, engine, gc, state)
+        # Jeda 1.5 detik per file config agar aman dari Write Quota 60 req/menit
+        time.sleep(1.5)
     except Exception as e:
       print(f"⚠️ Error memproses {os.path.basename(filepath)}: {e}")
 
