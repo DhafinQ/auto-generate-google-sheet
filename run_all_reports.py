@@ -429,12 +429,23 @@ def process_report_config(config_file_path, engine, gc, state):
   date_cell = metadata.get("date_cell", {"row": 5, "col": 3})
 
   now = datetime.now()
+  cfg_filename = os.path.basename(config_file_path)
 
-  is_hourly_tick = (now.minute == 58) or DEBUG_MODE
+  # Cek status jam sukses terakhir untuk config ini
+  hourly_state_key = f"{cfg_filename}_last_success_hour"
+  current_hour_str = now.strftime("%Y-%m-%d %H")
+  last_success_hour = state.get(hourly_state_key, "")
+
+  # is_hourly_tick aktif jika tepat di menit ke-58, DEBUG_MODE, atau ada kegagalan sebelumnya (retry)
+  is_scheduled_tick = (now.minute == 58) or DEBUG_MODE
+  needs_retry = (last_success_hour != current_hour_str) and (now.minute >= 58 or last_success_hour == "")
+
+  # Jalankan fixed snapshot jika jadwal reguler atau butuh retry jam berjalan
+  is_hourly_tick = is_scheduled_tick or (last_success_hour != current_hour_str)
 
   # Penentuan Siklus
   cycles = []
-  if now.hour == 6 and is_hourly_tick:
+  if now.hour == 6 and is_scheduled_tick:
     cycles.append(((now - timedelta(days=1)).date(), now.date()))
     cycles.append((now.date(), (now + timedelta(days=1)).date()))
   elif now.hour < 7:
@@ -447,21 +458,21 @@ def process_report_config(config_file_path, engine, gc, state):
     today_str = end_date.strftime("%Y-%m-%d")
     target_sheet_name = sheet_pattern.replace("{date}", yesterday_str)
 
-    # Deteksi perubahan data event sebelum menyentuh Google Sheets
+    # Deteksi perubahan dynamic event
     event_tasks_to_run = []
     intervals = metadata.get("intervals", {"start_time": "07:00", "end_time": "07:00"})
     start_cutoff = f"{yesterday_str} {intervals.get('start_time', '07:00')}:00"
     end_cutoff = f"{today_str} {intervals.get('end_time', '07:00')}:00"
 
     for event_cfg in dynamic_event_mappings:
-      event_key = f"{os.path.basename(config_file_path)}_{yesterday_str}_{event_cfg.get('event_name', 'event')}"
+      event_key = f"{cfg_filename}_{yesterday_str}_{event_cfg.get('event_name', 'event')}"
       current_count = get_event_record_count(engine, event_cfg.get("tables_pattern", []), start_cutoff, end_cutoff)
       last_count = state.get(event_key, -1)
 
       if is_hourly_tick or current_count != last_count:
         event_tasks_to_run.append((event_cfg, event_key, current_count))
 
-    # Jika bukan tick jam-jaman DAN tidak ada data event baru, skip Google Sheets API
+    # Lewati jika bukan jam eksekusi, tidak butuh retry, dan tidak ada event baru
     if not is_hourly_tick and not event_tasks_to_run:
       continue
 
@@ -475,7 +486,7 @@ def process_report_config(config_file_path, engine, gc, state):
     except gspread.exceptions.WorksheetNotFound:
       sheet_exists = False
 
-    # Buat Sheet Baru jika belum ada atau saat pergantian jam (hourly tick)
+    # Buat Sheet Baru jika belum ada atau saat tick jam-jaman
     if not sheet_exists or is_hourly_tick:
       try:
         template_ws = sh.worksheet(template_name)
@@ -490,12 +501,7 @@ def process_report_config(config_file_path, engine, gc, state):
 
       ws = template_ws.duplicate(new_sheet_name=target_sheet_name)
 
-      # -------------------------------------------------------------
-      # OPTIMASI BATCH UPDATE (Kop Tanggal + Snapshot Columns)
-      # -------------------------------------------------------------
       batch_payload = []
-
-      # 1. Masukkan update kop tanggal ke batch payload
       hari = HARI_INDONESIA.get(start_date.strftime("%A"), "")
       bulan = BULAN_INDONESIA.get(start_date.month, "")
       formatted_date = f"{hari}, {start_date.day} {bulan} {start_date.year}"
@@ -507,7 +513,6 @@ def process_report_config(config_file_path, engine, gc, state):
           "values": [[formatted_date]],
       })
 
-      # 2. Masukkan semua range snapshot per jam ke batch payload
       if column_mappings:
         df_data = process_fixed_snapshot_data(engine, column_mappings, metadata, yesterday_str, today_str)
         if not df_data.empty:
@@ -524,11 +529,10 @@ def process_report_config(config_file_path, engine, gc, state):
                 "values": df_data[keys].values.tolist(),
             })
 
-      # Kirim SEMUA data snapshot + kop tanggal dalam 1 API call
       if batch_payload:
         ws.batch_update(batch_payload)
 
-    # Update Parsial Dynamic Event (Bisa dimasukkan ke batch atau dipanggil langsung)
+    # Dynamic event batch write
     event_batch_payload = []
     for event_cfg, event_key, count in event_tasks_to_run:
       event_rows = process_dynamic_event_data(engine, event_cfg, yesterday_str, today_str, metadata)
@@ -545,13 +549,14 @@ def process_report_config(config_file_path, engine, gc, state):
             "range": range_str,
             "values": event_rows,
         })
-        print(f"    ⚡ Real-time Event Updated: '{event_cfg.get('event_name')}' ({len(event_rows)} baris)")
 
       state[event_key] = count
 
     if event_batch_payload:
       ws.batch_update(event_batch_payload)
 
+  # HANYA TANDAI SUKSES JIKA SELURUH PROSES DI ATAS BERJALAN TANPA EXCEPTION
+  state[hourly_state_key] = current_hour_str
 
 def main():
   now = datetime.now()
