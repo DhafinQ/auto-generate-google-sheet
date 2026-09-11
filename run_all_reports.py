@@ -8,6 +8,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 import gspread
 import numpy as np
+import traceback
 import pandas as pd
 from sqlalchemy import create_engine, inspect, text
 
