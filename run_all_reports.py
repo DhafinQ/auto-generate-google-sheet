@@ -585,6 +585,7 @@ def main():
         time.sleep(1.5)
     except Exception as e:
       print(f"⚠️ Error memproses {os.path.basename(filepath)}: {e}")
+      traceback.print_exc()
 
   save_event_state(state)
 
